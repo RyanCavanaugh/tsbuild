@@ -1,0 +1,30 @@
+{
+  "name": "tsbuild",
+  "version": "1.0.0",
+  "description": "Reference Implementation for TypeScript Composite Project Build Orchestration",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RyanCavanaugh/tsbuild.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/RyanCavanaugh/tsbuild/issues"
+  },
+  "homepage": "https://github.com/RyanCavanaugh/tsbuild#readme",
+  "dependencies": {
+    "glob": "^7.1.2",
+    "minimist": "^1.2.0",
+    "typescript": "^2.7.0-dev.20180112"
+  },
+  "devDependencies": {
+    "@types/glob": "^5.0.34",
+    "@types/minimist": "^1.2.0",
+    "@types/node": "^9.3.0"
+  }
+}
