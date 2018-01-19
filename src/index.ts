@@ -32,18 +32,8 @@ function parseConfigFile(fileName: string): ts.ParsedCommandLine | undefined {
 function main() {
     const cmdLine = minimist(process.argv.slice(2)) as CommandLine;
     const whatToDo = parseCommandline(cmdLine);
-    console.log(JSON.stringify(whatToDo));
 
-    for (const proj of whatToDo.roots) {
-        console.log(`Building ${proj}`);
-    }
     const host = ts.createCompilerHost({});
-    const root1 = whatToDo.roots[0];
-    const config = parseConfigFile(root1);
-    if (config === undefined) {
-        console.log(`Could not find or read file ${root1}`);
-        return process.exit(-1);
-    }
 
     // This is a list of list of projects that need to be built.
     // The ordering here is "backwards", i.e. the first entry in the array is the last set of projects that need to be built;
@@ -53,7 +43,14 @@ function main() {
     //   any entry that is duplicated to its right.
     const buildQueue: string[][] = [];
     let buildQueuePosition = 0;
-    enumerateReferences(path.resolve(root1), config);
+    for (const root of whatToDo.roots) {
+        const config = parseConfigFile(root);
+        if (config === undefined) {
+            // TODO: Error
+            return;
+        }
+        enumerateReferences(path.resolve(root), config);
+    }
     function enumerateReferences(fileName: string, root: ts.ParsedCommandLine) {
         const myBuildLevel = buildQueue[buildQueuePosition] = buildQueue[buildQueuePosition] || [];
         if (myBuildLevel.indexOf(fileName) < 0) {
@@ -64,7 +61,6 @@ function main() {
         if (refs === undefined) return;
         buildQueuePosition++;
         for (const ref of refs) {
-            console.log(`ref: ${ref}`);
             const resolvedRef = parseConfigFile(ref);
             if (resolvedRef === undefined) continue;
             enumerateReferences(path.resolve(ref), resolvedRef);
@@ -73,30 +69,46 @@ function main() {
     }
     cleanBuildQueue(buildQueue);
     printBuildQueue(buildQueue);
+    let dependentThreshold = 0;
     while (buildQueue.length > 0) {
         const nextSet = buildQueue.pop()!;
+        let nextDependentThreshold = dependentThreshold;
         for (const proj of nextSet) {
-            const utd = checkUpToDate(parseConfigFile(nextSet[0]));
+            const utd = checkUpToDate(parseConfigFile(nextSet[0]), dependentThreshold);
             const projectName = friendlyNameOfFile(proj);
-            if (utd === true) {
+            if (utd.result === "up-to-date") {
                 console.log(`Project ${projectName} is up-to-date with respect to its inputs`);
+                nextDependentThreshold = Math.max(nextDependentThreshold, utd.timestamp);
                 continue;
-            } else if (utd.reason === "missing") {
+            } else if (utd.result === "missing") {
                 console.log(`Project ${projectName} has not built output file ${friendlyNameOfFile(utd.missingFile)}`);
-            } else if (utd.reason === "out-of-date") {
-                console.log(utd.oldestFile);
-                console.log(`Project ${projectName} has input file ${friendlyNameOfFile(utd.newestFile)} newer than output file ${friendlyNameOfFile(utd.oldestFile)}`);
+                nextDependentThreshold = Date.now();
+            } else if (utd.result === "out-of-date") {
+                console.log(utd.olderFile);
+                console.log(`Project ${projectName} has input file ${friendlyNameOfFile(utd.newerFile)} newer than output file ${friendlyNameOfFile(utd.olderFile)}`);
+                nextDependentThreshold = Date.now();
             } else {
                 return throwIfReached(utd, "Unknown up-to-date return value");
             }
 
-            buildProject(proj);
+            if (!cmdLine.dry) {
+                if (!buildProject(proj)) {
+                    console.log('Aborting build due to errors');
+                    return;
+                }
+            }
         }
+        dependentThreshold = nextDependentThreshold;
     }
 }
 
-function buildProject(proj: string) {
+function buildProject(proj: string): boolean {
     console.log(`> tsc -p ${proj}`);
+    const configFile = parseConfigFile(proj);
+    if (!configFile) throw new Error(`Failed to read config file ${proj}`);
+    const program = ts.createProgram(configFile.fileNames, configFile.options);
+    program.emit();
+    return true;
 }
 
 function friendlyNameOfFile(fileName: string) {
@@ -110,7 +122,7 @@ function throwIfReached(x: never, message: string): never {
 function printBuildQueue(queue: string[][]) {
     console.log('== Build Order ==')
     for (let i = queue.length - 1; i >= 0; i--) {
-        console.log(` * ${queue[i].map(f => path.relative(process.cwd(), f)).join(', ')}`);
+        console.log(` * ${queue[i].map(friendlyNameOfFile).join(', ')}`);
     }
 }
 
@@ -132,54 +144,63 @@ function cleanBuildQueue(queue: string[][]): void {
     }
 }
 
-type UpToDateResult = true |
-    { reason: "missing", missingFile: string } |
-    { reason: "out-of-date", newestFile: string, oldestFile: string };
+type UpToDateResult =
+    { result: "up-to-date", timestamp: number } |
+    { result: "missing", missingFile: string } |
+    { result: "out-of-date", newerFile: string, olderFile: string };
 
-function checkUpToDate(configFile: ts.ParsedCommandLine | undefined): UpToDateResult {
+function checkUpToDate(configFile: ts.ParsedCommandLine | undefined, dependentThreshold: number): UpToDateResult {
     if (!configFile) throw new Error("No config file");
 
-    let newestInputFileTime = -1;
-    let newestInputFileName = "";
+    let newestInputFileTime = dependentThreshold;
+    let newestInputFileName = "a dependent project output";
     let oldestOutputFileTime = Infinity;
     let oldestOutputFileName = "";
+    let newestOutputFileTime = -1;
     for (const inputFile of configFile.fileNames) {
-        // .d.ts files do not have output files
-        if (/\.d\.ts$/.test(inputFile)) continue;
-        const expectedOutputFile = getOutputDeclarationFileName(inputFile, configFile);
-        // If the output file doesn't exist, the project is out of date
-        if (!ts.sys.fileExists(expectedOutputFile)) {
-           return { reason: "missing", missingFile: expectedOutputFile };
-        }
-
-        // Update noticed timestamps
         const inputFileTime = fs.statSync(inputFile).mtimeMs;
-        const outputFileTime = fs.statSync(expectedOutputFile).mtimeMs;
         if (inputFileTime > newestInputFileTime) {
             newestInputFileTime = inputFileTime;
             newestInputFileName = inputFile;
         }
-        if (outputFileTime < oldestOutputFileTime) {
-            oldestOutputFileTime = outputFileTime;
-            oldestOutputFileName = expectedOutputFile;
+
+        // .d.ts files do not have output files
+        if (!/\.d\.ts$/.test(inputFile)) {
+            const expectedOutputFile = getOutputDeclarationFileName(inputFile, configFile);
+            // If the output file doesn't exist, the project is out of date
+            if (!ts.sys.fileExists(expectedOutputFile)) {
+                return {
+                    result: "missing",
+                    missingFile: expectedOutputFile
+                };
+            }
+
+            const outputFileTime = fs.statSync(expectedOutputFile).mtimeMs;
+            if (outputFileTime < oldestOutputFileTime) {
+                oldestOutputFileTime = outputFileTime;
+                oldestOutputFileName = expectedOutputFile;
+            }
+            newestOutputFileTime = Math.max(newestOutputFileTime, outputFileTime);
         }
 
         if (newestInputFileTime > oldestOutputFileTime) {
             return {
-                reason: "out-of-date",
-                newestFile: newestInputFileName,
-                oldestFile: oldestOutputFileName
-            }
+                result: "out-of-date",
+                newerFile: newestInputFileName,
+                olderFile: oldestOutputFileName
+            };
         }
     }
-    return true;
+
+    return {
+        result: "up-to-date",
+        timestamp: newestInputFileTime
+    };
 }
 
 function getOutputDeclarationFileName(inputFileName: string, configFile: ts.ParsedCommandLine) {
     const relativePath = path.relative(configFile.options.rootDir!, inputFileName);
-    // console.log(`Relative path of ${inputFileName} to ${configFile.options.rootDir} is ${relativePath}`);
     const outputPath = path.resolve(configFile.options.outDir!, relativePath);
-    // console.log(`Resolved ${relativePath} via outDir ${configFile.options.outDir} to ${outputPath}`);
     return outputPath.replace(/\.tsx?$/, '.d.ts');
 }
 
