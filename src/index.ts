@@ -34,7 +34,7 @@ const args = yargs
         description: "Force rebuild of all projects"
     })
     .options('viz', {
-        type: "string",
+        default: false,
         description: "Render a project dependency graph"
     })
     .strict()
@@ -151,15 +151,16 @@ function main(cmdLine: CommandLine) {
     if (whatToDo.viz) {
         const lines: string[] = [];
         lines.push(`digraph project {`);
-        for (const key of dependencyMap.getKeys()) {
+        for (const key of whatToDo.roots) {
             lines.push(`    \"${veryFriendlyName(key)}\"`);
             for (const dep of dependencyMap.getReferencesOf(key)) {
                 lines.push(`    \"${veryFriendlyName(key)}\" -> \"${veryFriendlyName(dep)}\"`);
             }
         }
         lines.push(`}`);
-        console.log(lines.join('\r\n'));
-        fs.writeFile('graph.svg', viz(lines.join('\r\n'), { y: -1 }), { encoding: 'utf-8' }, err => {
+        const filename = `project-graph.svg`;
+        fs.writeFile(filename, viz(lines.join('\r\n'), { y: -1 }), { encoding: 'utf-8' }, err => {
+            console.log(`Wrote ${lines.length} lines to ${filename}`);
             if (err) throw err;
             process.exit(0);
         });
