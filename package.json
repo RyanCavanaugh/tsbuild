@@ -18,13 +18,18 @@
   },
   "homepage": "https://github.com/RyanCavanaugh/tsbuild#readme",
   "dependencies": {
+    "chokidar": "^2.0.0",
     "glob": "^7.1.2",
     "minimist": "^1.2.0",
-    "typescript": "^2.7.0-dev.20180112"
+    "typescript": "^2.7.0-dev.20180112",
+    "viz.js": "^1.8.0",
+    "yargs": "^10.1.1"
   },
   "devDependencies": {
+    "@types/chokidar": "^1.7.4",
     "@types/glob": "^5.0.34",
     "@types/minimist": "^1.2.0",
-    "@types/node": "^9.3.0"
+    "@types/node": "^9.3.0",
+    "@types/yargs": "^10.0.1"
   }
 }

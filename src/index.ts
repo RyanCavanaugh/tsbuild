@@ -3,11 +3,44 @@ import fs = require('fs');
 import path = require('path');
 import glob = require('glob');
 import ts = require('typescript');
+import yargs = require('yargs');
+import viz = require('viz.js');
+import { normalize } from 'path';
 
-type CommandLine = minimist.ParsedArgs & {
+type CommandLine = yargs.Arguments & {
+    _: string[];
     dry?: boolean;
+    watch?: boolean;
+    force?: boolean;
+    viz?: string;
     project?: string | string[];
 };
+
+const args = yargs
+    .usage('$0 [options] [proj1] [dir1] ...')
+    .option('watch', {
+        alias: 'w',
+        default: false,
+        describe: 'Watch mode'
+    })
+    .option('dry', {
+        alias: 'd',
+        default: false,
+        description: "Dry mode: Show what would be built and exit"
+    })
+    .option('force', {
+        alias: 'f',
+        default: false,
+        description: "Force rebuild of all projects"
+    })
+    .options('viz', {
+        type: "string",
+        description: "Render a project dependency graph"
+    })
+    .strict()
+    .parse() as CommandLine;
+
+main(args);
 
 function wrapSingle<T>(itemOrArray: T | T[] | undefined): T[] {
     if (itemOrArray === undefined) {
@@ -29,8 +62,52 @@ function parseConfigFile(fileName: string): ts.ParsedCommandLine | undefined {
     return configParseResult;
 }
 
-function main() {
-    const cmdLine = minimist(process.argv.slice(2)) as CommandLine;
+function createDependencyMapper() {
+    const childToParents: { [key: string]: string[] } = {};
+    const parentToChildren: { [key: string]: string[] } = {};
+    const allKeys: string[] = [];
+
+    function addReference(childConfigFileName: string, parentConfigFileName: string): void {
+        addEntry(childToParents, childConfigFileName, parentConfigFileName);
+        addEntry(parentToChildren, parentConfigFileName, childConfigFileName);
+    }
+
+    function getReferencesTo(parentConfigFileName: string): string[] {
+        return parentToChildren[normalize(parentConfigFileName)] || [];
+    }
+
+    function getReferencesOf(childConfigFileName: string): string[] {
+        return childToParents[normalize(childConfigFileName)] || [];
+    }
+
+    function getKeys(): ReadonlyArray<string> {
+        return allKeys;
+    }
+
+    function addEntry(mapToAddTo: typeof childToParents | typeof parentToChildren, key: string, element: string) {
+        key = normalize(key);
+        element = normalize(element);
+        const arr = (mapToAddTo[key] = mapToAddTo[key] || []);
+        if (arr.indexOf(element) < 0) {
+            arr.push(element);
+        }
+        if (allKeys.indexOf(key) < 0) allKeys.push(key);
+        if (allKeys.indexOf(element) < 0) allKeys.push(element);
+    }
+
+    return {
+        addReference,
+        getReferencesTo,
+        getReferencesOf,
+        getKeys
+    };
+}
+
+function veryFriendlyName(configFileName: string) {
+    return path.basename(path.dirname(configFileName));
+}
+
+function main(cmdLine: CommandLine) {
     const whatToDo = parseCommandline(cmdLine);
 
     const host = ts.createCompilerHost({});
@@ -42,6 +119,7 @@ function main() {
     // We traverse the reference graph from each root, then "clean" the list by removing
     //   any entry that is duplicated to its right.
     const buildQueue: string[][] = [];
+    const dependencyMap = createDependencyMapper();
     let buildQueuePosition = 0;
     for (const root of whatToDo.roots) {
         const config = parseConfigFile(root);
@@ -51,7 +129,8 @@ function main() {
         }
         enumerateReferences(path.resolve(root), config);
     }
-    function enumerateReferences(fileName: string, root: ts.ParsedCommandLine) {
+
+    function enumerateReferences(fileName: string, root: ts.ParsedCommandLine): void {
         const myBuildLevel = buildQueue[buildQueuePosition] = buildQueue[buildQueuePosition] || [];
         if (myBuildLevel.indexOf(fileName) < 0) {
             myBuildLevel.push(fileName);
@@ -61,25 +140,44 @@ function main() {
         if (refs === undefined) return;
         buildQueuePosition++;
         for (const ref of refs) {
+            dependencyMap.addReference(fileName, ref);
             const resolvedRef = parseConfigFile(ref);
             if (resolvedRef === undefined) continue;
             enumerateReferences(path.resolve(ref), resolvedRef);
         }
         buildQueuePosition--;
     }
-    cleanBuildQueue(buildQueue);
-    printBuildQueue(buildQueue);
+
+    if (whatToDo.viz) {
+        const lines: string[] = [];
+        lines.push(`digraph project {`);
+        for (const key of dependencyMap.getKeys()) {
+            lines.push(`    \"${veryFriendlyName(key)}\"`);
+            for (const dep of dependencyMap.getReferencesOf(key)) {
+                lines.push(`    \"${veryFriendlyName(key)}\" -> \"${veryFriendlyName(dep)}\"`);
+            }
+        }
+        lines.push(`}`);
+        console.log(lines.join('\r\n'));
+        fs.writeFile('graph.svg', viz(lines.join('\r\n'), { y: -1 }), { encoding: 'utf-8' }, err => {
+            if (err) throw err;
+            process.exit(0);
+        });
+        return;
+    }
+
+    removeDuplicates(buildQueue);
     let dependentThreshold = 0;
     while (buildQueue.length > 0) {
         const nextSet = buildQueue.pop()!;
         let nextDependentThreshold = dependentThreshold;
         for (const proj of nextSet) {
-            const utd = checkUpToDate(parseConfigFile(nextSet[0]), dependentThreshold);
+            const utd = checkUpToDate(parseConfigFile(proj), proj, dependentThreshold);
             const projectName = friendlyNameOfFile(proj);
             if (utd.result === "up-to-date") {
                 console.log(`Project ${projectName} is up-to-date with respect to its inputs`);
                 nextDependentThreshold = Math.max(nextDependentThreshold, utd.timestamp);
-                continue;
+                if (!whatToDo.force) continue;
             } else if (utd.result === "missing") {
                 console.log(`Project ${projectName} has not built output file ${friendlyNameOfFile(utd.missingFile)}`);
                 nextDependentThreshold = Date.now();
@@ -91,11 +189,11 @@ function main() {
                 return throwIfReached(utd, "Unknown up-to-date return value");
             }
 
-            if (!cmdLine.dry) {
-                if (!buildProject(proj)) {
-                    console.log('Aborting build due to errors');
-                    return;
-                }
+            if (cmdLine.dry) continue;
+
+            if (!buildProject(proj)) {
+                console.log('Aborting build due to errors');
+                return;
             }
         }
         dependentThreshold = nextDependentThreshold;
@@ -103,11 +201,18 @@ function main() {
 }
 
 function buildProject(proj: string): boolean {
-    console.log(`> tsc -p ${proj}`);
     const configFile = parseConfigFile(proj);
     if (!configFile) throw new Error(`Failed to read config file ${proj}`);
     const program = ts.createProgram(configFile.fileNames, configFile.options);
-    program.emit();
+    console.log(`Building ${veryFriendlyName(proj)} to ${program.getCompilerOptions().outDir}...`);
+    program.emit(undefined, (fileName, content) => {
+        const dir = path.dirname(fileName);
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir);
+        }
+        fs.writeFileSync(fileName, content, 'utf-8');
+        console.log(`    * Wrote ${content.length} bytes to ${path.basename(fileName)}`);
+    });
     return true;
 }
 
@@ -116,7 +221,7 @@ function friendlyNameOfFile(fileName: string) {
 }
 
 function throwIfReached(x: never, message: string): never {
-    throw new Error(message)
+    throw new Error(message);
 }
 
 function printBuildQueue(queue: string[][]) {
@@ -130,7 +235,7 @@ function printBuildQueue(queue: string[][]) {
  * Removes entries from arrays which appear in later arrays.
  * TODO: Make not O(n^2)
  */
-function cleanBuildQueue(queue: string[][]): void {
+function removeDuplicates(queue: string[][]): void {
     // No need to check the last array
     for (let i = 0; i < queue.length - 1; i++) {
         queue[i] = queue[i].filter(fn => !occursAfter(fn, i + 1));
@@ -149,7 +254,7 @@ type UpToDateResult =
     { result: "missing", missingFile: string } |
     { result: "out-of-date", newerFile: string, olderFile: string };
 
-function checkUpToDate(configFile: ts.ParsedCommandLine | undefined, dependentThreshold: number): UpToDateResult {
+function checkUpToDate(configFile: ts.ParsedCommandLine | undefined, configFileName: string, dependentThreshold: number): UpToDateResult {
     if (!configFile) throw new Error("No config file");
 
     let newestInputFileTime = dependentThreshold;
@@ -166,7 +271,7 @@ function checkUpToDate(configFile: ts.ParsedCommandLine | undefined, dependentTh
 
         // .d.ts files do not have output files
         if (!/\.d\.ts$/.test(inputFile)) {
-            const expectedOutputFile = getOutputDeclarationFileName(inputFile, configFile);
+            const expectedOutputFile = getOutputDeclarationFileName(inputFile, configFile, configFileName);
             // If the output file doesn't exist, the project is out of date
             if (!ts.sys.fileExists(expectedOutputFile)) {
                 return {
@@ -198,8 +303,8 @@ function checkUpToDate(configFile: ts.ParsedCommandLine | undefined, dependentTh
     };
 }
 
-function getOutputDeclarationFileName(inputFileName: string, configFile: ts.ParsedCommandLine) {
-    const relativePath = path.relative(configFile.options.rootDir!, inputFileName);
+function getOutputDeclarationFileName(inputFileName: string, configFile: ts.ParsedCommandLine, configFileName: string) {
+    const relativePath = path.relative(configFile.options.rootDir || path.dirname(configFileName), inputFileName);
     const outputPath = path.resolve(configFile.options.outDir!, relativePath);
     return outputPath.replace(/\.tsx?$/, '.d.ts');
 }
@@ -224,7 +329,10 @@ function parseCommandline(cmdLine: CommandLine) {
 
     return {
         roots,
-        dry: cmdLine.dry || false
+        dry: cmdLine.dry || false,
+        watch: cmdLine.watch || false,
+        force: cmdLine.force || false,
+        viz: cmdLine.viz
     };
 
     function addInferred(unknown: string) {
@@ -254,4 +362,3 @@ function resolvePath(fileName: string) {
     return path.resolve(process.cwd(), fileName);
 }
 
-main();
