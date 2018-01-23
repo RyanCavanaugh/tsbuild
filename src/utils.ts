@@ -32,6 +32,10 @@ export function friendlyNameOfFile(fileName: string) {
     return path.relative(process.cwd(), fileName);
 }
 
+export function veryFriendlyName(configFileName: string) {
+    return path.basename(path.dirname(configFileName));
+}
+
 export function throwIfReached(x: never, message: string): never {
     throw new Error(message);
 }

@@ -4,78 +4,36 @@ import path = require('path');
 
 import minimist = require('minimist');
 import ts = require('typescript');
-import viz = require('viz.js');
 import chokidar = require('chokidar');
 
-
-import { createDependencyMapper } from './dependency-map';
-import { wrapSingle, removeDuplicates, friendlyNameOfFile, throwIfReached, resolvePathRelativeToCwd } from './utils';
+import { createDependencyMapper, Mapper } from './dependency-map';
+import { wrapSingle, removeDuplicates, friendlyNameOfFile, throwIfReached, resolvePathRelativeToCwd, veryFriendlyName } from './utils';
 import { yargsSetup, parseCommandline, TsBuildCommandLine } from './command-line';
+import { renderGraphVisualization } from './visualizer';
 
 const whatToDo = parseCommandline(yargsSetup.parse());
+const host = ts.createCompilerHost({});
 main(whatToDo);
 
 function main(whatToDo: TsBuildCommandLine) {
-    const host = ts.createCompilerHost({});
-
     // This is a list of list of projects that need to be built.
     // The ordering here is "backwards", i.e. the first entry in the array is the last set of projects that need to be built;
     //   and the last entry is the first set of projects to be built.
     // Each subarray is unordered.
     // We traverse the reference graph from each root, then "clean" the list by removing
     //   any entry that is duplicated to its right.
-    const buildQueue: string[][] = [];
-    const dependencyMap = createDependencyMapper();
-    let buildQueuePosition = 0;
-    for (const root of whatToDo.roots) {
-        const config = parseConfigFile(root);
-        if (config === undefined) {
-            // TODO: Error
-            return;
-        }
-        enumerateReferences(path.resolve(root), config);
-    }
 
-    function enumerateReferences(fileName: string, root: ts.ParsedCommandLine): void {
-        const myBuildLevel = buildQueue[buildQueuePosition] = buildQueue[buildQueuePosition] || [];
-        if (myBuildLevel.indexOf(fileName) < 0) {
-            myBuildLevel.push(fileName);
-        }
-
-        const refs = ts.getProjectReferences(host, root.options);
-        if (refs === undefined) return;
-        buildQueuePosition++;
-        for (const ref of refs) {
-            dependencyMap.addReference(fileName, ref);
-            const resolvedRef = parseConfigFile(ref);
-            if (resolvedRef === undefined) continue;
-            enumerateReferences(path.resolve(ref), resolvedRef);
-        }
-        buildQueuePosition--;
-    }
-
-    if (whatToDo.viz) {
-        const lines: string[] = [];
-        lines.push(`digraph project {`);
-        for (const key of whatToDo.roots) {
-            lines.push(`    \"${veryFriendlyName(key)}\"`);
-            for (const dep of dependencyMap.getReferencesOf(key)) {
-                lines.push(`    \"${veryFriendlyName(key)}\" -> \"${veryFriendlyName(dep)}\"`);
-            }
-        }
-        lines.push(`}`);
-        const filename = `project-graph.svg`;
-        fs.writeFile(filename, viz(lines.join('\r\n'), { y: -1 }), { encoding: 'utf-8' }, err => {
-            console.log(`Wrote ${lines.length} lines to ${filename}`);
-            if (err) throw err;
-            process.exit(0);
-        });
-        return;
-    }
-
-    removeDuplicates(buildQueue);
     let dependentThreshold = 0;
     const projectsNeedingBuild: { [projFilename: string]: true } = {};
+
+    const graph = createDependencyGraph(whatToDo.roots);
+    const { buildQueue, dependencyMap } = graph;
+
+
+    if (whatToDo.viz) {
+        renderGraphVisualization(whatToDo.roots, graph, 'project-graph.svg');
+        return;
+    }
 
     while (buildQueue.length > 0) {
         const nextSet = buildQueue.pop()!;
@@ -107,6 +65,49 @@ function main(whatToDo: TsBuildCommandLine) {
     }
 }
 
+export interface DependencyGraph {
+    buildQueue: string[][];
+    dependencyMap: Mapper;
+}
+
+function createDependencyGraph(roots: string[]): DependencyGraph {
+    const buildQueue: string[][] = [];
+    const dependencyMap = createDependencyMapper();
+    let buildQueuePosition = 0;
+    for (const root of whatToDo.roots) {
+        const config = parseConfigFile(root);
+        if (config === undefined) {
+            throw new Error(`Could not parse ${root}`);
+        }
+        enumerateReferences(path.resolve(root), config);
+    }
+
+    function enumerateReferences(fileName: string, root: ts.ParsedCommandLine): void {
+        const myBuildLevel = buildQueue[buildQueuePosition] = buildQueue[buildQueuePosition] || [];
+        if (myBuildLevel.indexOf(fileName) < 0) {
+            myBuildLevel.push(fileName);
+        }
+
+        const refs = ts.getProjectReferences(host, root.options);
+        if (refs === undefined) return;
+        buildQueuePosition++;
+        for (const ref of refs) {
+            dependencyMap.addReference(fileName, ref);
+            const resolvedRef = parseConfigFile(ref);
+            if (resolvedRef === undefined) continue;
+            enumerateReferences(path.resolve(ref), resolvedRef);
+        }
+        buildQueuePosition--;
+    }
+
+    removeDuplicates(buildQueue);
+
+    return ({
+        buildQueue,
+        dependencyMap
+    });
+}
+
 function parseConfigFile(fileName: string): ts.ParsedCommandLine | undefined {
     const rawFileContent = ts.sys.readFile(fileName, 'utf-8');
     if (rawFileContent === undefined) {
@@ -115,10 +116,6 @@ function parseConfigFile(fileName: string): ts.ParsedCommandLine | undefined {
     const parsedFileContent = ts.parseJsonText(fileName, rawFileContent);
     const configParseResult = ts.parseJsonSourceFileConfigFileContent(parsedFileContent, ts.sys, path.dirname(fileName), /*optionsToExtend*/ undefined, fileName);
     return configParseResult;
-}
-
-function veryFriendlyName(configFileName: string) {
-    return path.basename(path.dirname(configFileName));
 }
 
 function buildProject(proj: string): boolean {

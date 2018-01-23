@@ -1,5 +1,8 @@
 import { normalize } from 'path';
 
+export const __ = createDependencyMapper();
+export type Mapper = typeof __;
+
 export function createDependencyMapper() {
     const childToParents: { [key: string]: string[] } = {};
     const parentToChildren: { [key: string]: string[] } = {};
