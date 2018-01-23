@@ -1,115 +1,21 @@
-import minimist = require('minimist');
 import fs = require('fs');
-import path = require('path');
-import glob = require('glob');
-import ts = require('typescript');
-import yargs = require('yargs');
-import viz = require('viz.js');
 import { normalize } from 'path';
+import path = require('path');
 
-type CommandLine = yargs.Arguments & {
-    _: string[];
-    dry?: boolean;
-    watch?: boolean;
-    force?: boolean;
-    viz?: string;
-    project?: string | string[];
-};
+import minimist = require('minimist');
+import ts = require('typescript');
+import viz = require('viz.js');
+import chokidar = require('chokidar');
 
-const args = yargs
-    .usage('$0 [options] [proj1] [dir1] ...')
-    .option('watch', {
-        alias: 'w',
-        default: false,
-        describe: 'Watch mode'
-    })
-    .option('dry', {
-        alias: 'd',
-        default: false,
-        description: "Dry mode: Show what would be built and exit"
-    })
-    .option('force', {
-        alias: 'f',
-        default: false,
-        description: "Force rebuild of all projects"
-    })
-    .options('viz', {
-        default: false,
-        description: "Render a project dependency graph"
-    })
-    .strict()
-    .parse() as CommandLine;
 
-main(args);
+import { createDependencyMapper } from './dependency-map';
+import { wrapSingle, removeDuplicates, friendlyNameOfFile, throwIfReached, resolvePathRelativeToCwd } from './utils';
+import { yargsSetup, parseCommandline, TsBuildCommandLine } from './command-line';
 
-function wrapSingle<T>(itemOrArray: T | T[] | undefined): T[] {
-    if (itemOrArray === undefined) {
-        return [];
-    } else if (Array.isArray(itemOrArray)) {
-        return itemOrArray;
-    } else {
-        return [itemOrArray];
-    }
-}
+const whatToDo = parseCommandline(yargsSetup.parse());
+main(whatToDo);
 
-function parseConfigFile(fileName: string): ts.ParsedCommandLine | undefined {
-    const rawFileContent = ts.sys.readFile(fileName, 'utf-8');
-    if (rawFileContent === undefined) {
-        return undefined;
-    }
-    const parsedFileContent = ts.parseJsonText(fileName, rawFileContent);
-    const configParseResult = ts.parseJsonSourceFileConfigFileContent(parsedFileContent, ts.sys, path.dirname(fileName), /*optionsToExtend*/ undefined, fileName);
-    return configParseResult;
-}
-
-function createDependencyMapper() {
-    const childToParents: { [key: string]: string[] } = {};
-    const parentToChildren: { [key: string]: string[] } = {};
-    const allKeys: string[] = [];
-
-    function addReference(childConfigFileName: string, parentConfigFileName: string): void {
-        addEntry(childToParents, childConfigFileName, parentConfigFileName);
-        addEntry(parentToChildren, parentConfigFileName, childConfigFileName);
-    }
-
-    function getReferencesTo(parentConfigFileName: string): string[] {
-        return parentToChildren[normalize(parentConfigFileName)] || [];
-    }
-
-    function getReferencesOf(childConfigFileName: string): string[] {
-        return childToParents[normalize(childConfigFileName)] || [];
-    }
-
-    function getKeys(): ReadonlyArray<string> {
-        return allKeys;
-    }
-
-    function addEntry(mapToAddTo: typeof childToParents | typeof parentToChildren, key: string, element: string) {
-        key = normalize(key);
-        element = normalize(element);
-        const arr = (mapToAddTo[key] = mapToAddTo[key] || []);
-        if (arr.indexOf(element) < 0) {
-            arr.push(element);
-        }
-        if (allKeys.indexOf(key) < 0) allKeys.push(key);
-        if (allKeys.indexOf(element) < 0) allKeys.push(element);
-    }
-
-    return {
-        addReference,
-        getReferencesTo,
-        getReferencesOf,
-        getKeys
-    };
-}
-
-function veryFriendlyName(configFileName: string) {
-    return path.basename(path.dirname(configFileName));
-}
-
-function main(cmdLine: CommandLine) {
-    const whatToDo = parseCommandline(cmdLine);
-
+function main(whatToDo: TsBuildCommandLine) {
     const host = ts.createCompilerHost({});
 
     // This is a list of list of projects that need to be built.
@@ -169,36 +75,50 @@ function main(cmdLine: CommandLine) {
 
     removeDuplicates(buildQueue);
     let dependentThreshold = 0;
+    const projectsNeedingBuild: { [projFilename: string]: true } = {};
+
     while (buildQueue.length > 0) {
         const nextSet = buildQueue.pop()!;
-        let nextDependentThreshold = dependentThreshold;
         for (const proj of nextSet) {
-            const utd = checkUpToDate(parseConfigFile(proj), proj, dependentThreshold);
+            const dependsOnUnbuiltProject = dependencyMap.getReferencesOf(proj).some(p => projectsNeedingBuild[p]);
+            const utd = checkUpToDate(parseConfigFile(proj), proj);
             const projectName = friendlyNameOfFile(proj);
-            if (utd.result === "up-to-date") {
+            if (dependsOnUnbuiltProject) {
+                console.log(`Project ${projectName} is out-to-date with respect to a project it depends on`);
+            } else if (utd.result === "up-to-date") {
                 console.log(`Project ${projectName} is up-to-date with respect to its inputs`);
-                nextDependentThreshold = Math.max(nextDependentThreshold, utd.timestamp);
                 if (!whatToDo.force) continue;
             } else if (utd.result === "missing") {
                 console.log(`Project ${projectName} has not built output file ${friendlyNameOfFile(utd.missingFile)}`);
-                nextDependentThreshold = Date.now();
             } else if (utd.result === "out-of-date") {
-                console.log(utd.olderFile);
                 console.log(`Project ${projectName} has input file ${friendlyNameOfFile(utd.newerFile)} newer than output file ${friendlyNameOfFile(utd.olderFile)}`);
-                nextDependentThreshold = Date.now();
             } else {
                 return throwIfReached(utd, "Unknown up-to-date return value");
             }
 
-            if (cmdLine.dry) continue;
+            projectsNeedingBuild[proj] = true;
+            if (whatToDo.dry) continue;
 
             if (!buildProject(proj)) {
                 console.log('Aborting build due to errors');
                 return;
             }
         }
-        dependentThreshold = nextDependentThreshold;
     }
+}
+
+function parseConfigFile(fileName: string): ts.ParsedCommandLine | undefined {
+    const rawFileContent = ts.sys.readFile(fileName, 'utf-8');
+    if (rawFileContent === undefined) {
+        return undefined;
+    }
+    const parsedFileContent = ts.parseJsonText(fileName, rawFileContent);
+    const configParseResult = ts.parseJsonSourceFileConfigFileContent(parsedFileContent, ts.sys, path.dirname(fileName), /*optionsToExtend*/ undefined, fileName);
+    return configParseResult;
+}
+
+function veryFriendlyName(configFileName: string) {
+    return path.basename(path.dirname(configFileName));
 }
 
 function buildProject(proj: string): boolean {
@@ -217,36 +137,10 @@ function buildProject(proj: string): boolean {
     return true;
 }
 
-function friendlyNameOfFile(fileName: string) {
-    return path.relative(process.cwd(), fileName);
-}
-
-function throwIfReached(x: never, message: string): never {
-    throw new Error(message);
-}
-
 function printBuildQueue(queue: string[][]) {
     console.log('== Build Order ==')
     for (let i = queue.length - 1; i >= 0; i--) {
         console.log(` * ${queue[i].map(friendlyNameOfFile).join(', ')}`);
-    }
-}
-
-/**
- * Removes entries from arrays which appear in later arrays.
- * TODO: Make not O(n^2)
- */
-function removeDuplicates(queue: string[][]): void {
-    // No need to check the last array
-    for (let i = 0; i < queue.length - 1; i++) {
-        queue[i] = queue[i].filter(fn => !occursAfter(fn, i + 1));
-    }
-
-    function occursAfter(s: string, start: number) {
-        for (let i = start; i < queue.length; i++) {
-            if (queue[i].indexOf(s) >= 0) return true;
-        }
-        return false;
     }
 }
 
@@ -255,11 +149,11 @@ type UpToDateResult =
     { result: "missing", missingFile: string } |
     { result: "out-of-date", newerFile: string, olderFile: string };
 
-function checkUpToDate(configFile: ts.ParsedCommandLine | undefined, configFileName: string, dependentThreshold: number): UpToDateResult {
+function checkUpToDate(configFile: ts.ParsedCommandLine | undefined, configFileName: string): UpToDateResult {
     if (!configFile) throw new Error("No config file");
 
-    let newestInputFileTime = dependentThreshold;
-    let newestInputFileName = "a dependent project output";
+    let newestInputFileTime = -Infinity;
+    let newestInputFileName = "????";
     let oldestOutputFileTime = Infinity;
     let oldestOutputFileName = "";
     let newestOutputFileTime = -1;
@@ -309,57 +203,3 @@ function getOutputDeclarationFileName(inputFileName: string, configFile: ts.Pars
     const outputPath = path.resolve(configFile.options.outDir!, relativePath);
     return outputPath.replace(/\.tsx?$/, '.d.ts');
 }
-
-function parseCommandline(cmdLine: CommandLine) {
-    const roots: string[] = [];
-
-    let anythingHappened = false;
-    for (const project of wrapSingle(cmdLine.project)) {
-        addInferred(resolvePath(project));
-        anythingHappened = true;
-    }
-
-    for (const unknown of cmdLine._) {
-        addInferred(resolvePath(unknown));
-        anythingHappened = true;
-    }
-
-    if (!anythingHappened) {
-        addInferred('.');
-    }
-
-    return {
-        roots,
-        dry: cmdLine.dry || false,
-        watch: cmdLine.watch || false,
-        force: cmdLine.force || false,
-        viz: cmdLine.viz
-    };
-
-    function addInferred(unknown: string) {
-        const unknownResolved = resolvePath(unknown);
-        if (!fs.existsSync(unknownResolved)) {
-            return {
-                error: `File ${unknown} doesn't exist`
-            };
-        }
-        if (fs.lstatSync(unknownResolved).isDirectory()) {
-            // Directory - recursively look for tsconfig.json files
-            const configs = glob.sync(path.join(unknownResolved, '**', 'tsconfig.json'));
-            for (const cfg of configs) {
-                addRootProject(cfg);
-            }
-        } else if (fs.existsSync(unknownResolved)) {
-            addRootProject(unknownResolved);
-        }
-    }
-
-    function addRootProject(fileName: string) {
-        roots.push(fileName);
-    }
-}
-
-function resolvePath(fileName: string) {
-    return path.resolve(process.cwd(), fileName);
-}
-
