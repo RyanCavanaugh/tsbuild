@@ -6,20 +6,23 @@ import mkdirp = require('mkdirp');
 import minimist = require('minimist');
 import ts = require('typescript');
 import chokidar = require('chokidar');
+import glob = require('glob');
 
 import { createDependencyMapper, Mapper, __ } from './dependency-map';
-import { wrapSingle, removeDuplicatesFromBuildQueue, friendlyNameOfFile, throwIfReached, resolvePathRelativeToCwd, veryFriendlyName, clone2DArray, flatten } from './utils';
+import { wrapSingle, removeDuplicatesFromBuildQueue, friendlyNameOfFile, throwIfReached, resolvePathRelativeToCwd, veryFriendlyName, clone2DArray, flatten, getCanonicalFileName } from './utils';
 import { yargsSetup, parseCommandline, TsBuildCommandLine } from './command-line';
 import { renderGraphVisualization } from './visualizer';
+import { callbackify } from 'util';
 
 const host = ts.createCompilerHost({});
+const watchers: chokidar.FSWatcher[] = [];
 
 namespace main {
     const whatToDo = parseCommandline(yargsSetup.parse());
     main(whatToDo);
 
     function main(whatToDo: TsBuildCommandLine) {
-        const graph = createDependencyGraph(whatToDo.roots);
+        let graph = createDependencyGraph(whatToDo.roots);
 
         processBuildQueue(graph, handleBuildStatus);
 
@@ -31,8 +34,31 @@ namespace main {
         if (whatToDo.watch) {
             console.log("Watching for file changes...");
             for (const proj of flatten(graph.buildQueue)) {
-                watchFilesForProject(proj);
+                watchFilesForProject(proj, {
+                    rebuildProject,
+                    rebuildGraph
+                });
             }
+        }
+
+        function rebuildProject(projectName: string) {
+            buildProject(projectName);
+        }
+
+        function rebuildGraph() {
+            console.log('Rebuilding project graph due to an edit in a config file');
+            graph = createDependencyGraph(whatToDo.roots);
+            for (const w of watchers) {
+                w.close();
+            }
+            watchers.length = 0;
+            for (const proj of flatten(graph.buildQueue)) {
+                watchFilesForProject(proj, {
+                    rebuildProject,
+                    rebuildGraph
+                });
+            }
+            processBuildQueue(graph, handleBuildStatus);
         }
 
         function handleBuildStatus(configFileName: string, status: UpToDateStatus): boolean {
@@ -61,6 +87,11 @@ namespace main {
             return true;
         }
     }
+}
+
+interface WatchCallbacks {
+    rebuildProject(configFileName: string, changedFile: string): void;
+    rebuildGraph(): void;
 }
 
 function processBuildQueue(graph: DependencyGraph, buildCallback: (configFileName: string, status: UpToDateStatus) => boolean) {
@@ -105,34 +136,41 @@ function performRebuild(changedProject: string) {
     }
 }
 
-function watchFilesForProject(configFile: string) {
+function watchFilesForProject(configFile: string, callbacks: WatchCallbacks) {
     // Watch the config file itself
-    chokidar.watch(configFile, undefined).on('change', () => {
-        console.log(`Config file ${configFile} changed; rebuilding project graph...`);
-        rebuildProjectGraph();
+    const projWatch = chokidar.watch(configFile, undefined);
+    watchers.push(projWatch);
+    projWatch.on('change', () => {
+        callbacks.rebuildGraph();
     });
-    console.log(`Watching files for ${configFile}`);
     const cfg = parseConfigFile(configFile)!;
 
+    const watchedDirs: string[] = [];
     if (cfg.wildcardDirectories) {
         for (const dir of Object.keys(cfg.wildcardDirectories)) {
+            watchedDirs.push(getCanonicalFileName(dir));
             const opts: chokidar.WatchOptions = {
                 depth: cfg.wildcardDirectories[dir] === ts.WatchDirectoryFlags.Recursive ? 100 : 0,
                 ignoreInitial: true
             };
-            chokidar.watch(dir, opts).on('all', (event, path) => {
-                console.log(`Rebuild ${configFile} due to ${event} on ${path}`);
+            const dirWatch = chokidar.watch(dir, opts);
+            watchers.push(dirWatch);
+            dirWatch.on('all', (event, path) => {
+                callbacks.rebuildProject(configFile, path);
             });
         }
     }
 
-    for (const file of cfg.fileNames) {
-        console.log(`Watching ${file}`);
+    for (const file of cfg.fileNames.map(getCanonicalFileName)) {
+        if (watchedDirs.some(d => file.indexOf(d) === 0)) {
+            // console.log(`File ${file} is already watched by a directory watch`);
+            continue;
+        }
+        const fileWatch = chokidar.watch(file, { ignoreInitial: true });
+        fileWatch.on('all', (event, path) => {
+            callbacks.rebuildProject(configFile, path);
+        });
     }
-}
-
-function rebuildProjectGraph() {
-    console.log('todo');
 }
 
 export interface DependencyGraph {

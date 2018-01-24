@@ -1,5 +1,13 @@
 import path = require('path');
 
+export function getCanonicalFileName(fileName: string) {
+    fileName = path.resolve(fileName);
+    if (fileName[1] === ':') {
+        return fileName[0].toUpperCase() + ':' + fileName.substr(2);
+    }
+    return fileName;
+}
+
 export function flatten<T>(arr: ReadonlyArray<ReadonlyArray<T>>): T[] {
     return Array.prototype.concat.apply([], arr);
 }
