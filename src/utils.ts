@@ -1,5 +1,13 @@
 import path = require('path');
 
+export function flatten<T>(arr: ReadonlyArray<ReadonlyArray<T>>): T[] {
+    return Array.prototype.concat.apply([], arr);
+}
+
+export function clone2DArray<T>(arr: ReadonlyArray<ReadonlyArray<T>> | T[][]): T[][] {
+    return (arr as T[][]).map(subArr => subArr.slice());
+}
+
 export function wrapSingle<T>(itemOrArray: T | T[] | undefined): T[] {
     if (itemOrArray === undefined) {
         return [];
@@ -14,7 +22,7 @@ export function wrapSingle<T>(itemOrArray: T | T[] | undefined): T[] {
  * Removes entries from arrays which appear in later arrays.
  * TODO: Make not O(n^2)
  */
-export function removeDuplicates(queue: string[][]): void {
+export function removeDuplicatesFromBuildQueue(queue: string[][]): void {
     // No need to check the last array
     for (let i = 0; i < queue.length - 1; i++) {
         queue[i] = queue[i].filter(fn => !occursAfter(fn, i + 1));
@@ -36,7 +44,7 @@ export function veryFriendlyName(configFileName: string) {
     return path.basename(path.dirname(configFileName));
 }
 
-export function throwIfReached(x: never, message: string): never {
+export function throwIfReached(_: never, message: string): never {
     throw new Error(message);
 }
 

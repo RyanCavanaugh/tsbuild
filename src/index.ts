@@ -2,79 +2,155 @@ import fs = require('fs');
 import { normalize } from 'path';
 import path = require('path');
 
+import mkdirp = require('mkdirp');
 import minimist = require('minimist');
 import ts = require('typescript');
 import chokidar = require('chokidar');
 
-import { createDependencyMapper, Mapper } from './dependency-map';
-import { wrapSingle, removeDuplicates, friendlyNameOfFile, throwIfReached, resolvePathRelativeToCwd, veryFriendlyName } from './utils';
+import { createDependencyMapper, Mapper, __ } from './dependency-map';
+import { wrapSingle, removeDuplicatesFromBuildQueue, friendlyNameOfFile, throwIfReached, resolvePathRelativeToCwd, veryFriendlyName, clone2DArray, flatten } from './utils';
 import { yargsSetup, parseCommandline, TsBuildCommandLine } from './command-line';
 import { renderGraphVisualization } from './visualizer';
 
-const whatToDo = parseCommandline(yargsSetup.parse());
 const host = ts.createCompilerHost({});
-main(whatToDo);
 
-function main(whatToDo: TsBuildCommandLine) {
-    // This is a list of list of projects that need to be built.
-    // The ordering here is "backwards", i.e. the first entry in the array is the last set of projects that need to be built;
-    //   and the last entry is the first set of projects to be built.
-    // Each subarray is unordered.
-    // We traverse the reference graph from each root, then "clean" the list by removing
-    //   any entry that is duplicated to its right.
+namespace main {
+    const whatToDo = parseCommandline(yargsSetup.parse());
+    main(whatToDo);
 
-    let dependentThreshold = 0;
-    const projectsNeedingBuild: { [projFilename: string]: true } = {};
+    function main(whatToDo: TsBuildCommandLine) {
+        const graph = createDependencyGraph(whatToDo.roots);
 
-    const graph = createDependencyGraph(whatToDo.roots);
-    const { buildQueue, dependencyMap } = graph;
+        processBuildQueue(graph, handleBuildStatus);
 
+        if (whatToDo.viz) {
+            renderGraphVisualization(whatToDo.roots, graph, 'project-graph.svg');
+            return;
+        }
 
-    if (whatToDo.viz) {
-        renderGraphVisualization(whatToDo.roots, graph, 'project-graph.svg');
-        return;
+        if (whatToDo.watch) {
+            console.log("Watching for file changes...");
+            for (const proj of flatten(graph.buildQueue)) {
+                watchFilesForProject(proj);
+            }
+        }
+
+        function handleBuildStatus(configFileName: string, status: UpToDateStatus): boolean {
+            const projectName = friendlyNameOfFile(configFileName);
+            let shouldBuild: boolean = true;
+            switch (status.result) {
+                case "older-than-dependency":
+                    console.log(`Project ${projectName} is out-to-date with respect to its dependency ${friendlyNameOfFile(status.dependency)}`);
+                    break;
+                case "missing":
+                    console.log(`Project ${projectName} has not built output file ${friendlyNameOfFile(status.missingFile)}`);
+                    break;
+                case "out-of-date":
+                    console.log(`Project ${projectName} has input file ${friendlyNameOfFile(status.newerFile)} newer than output file ${friendlyNameOfFile(status.olderFile)}`);
+                    break;
+                case "up-to-date":
+                    console.log(`Project ${projectName} is up-to-date with respect to its inputs`);
+                    shouldBuild = whatToDo.force;
+                    break;
+                default:
+                    throwIfReached(status, "Unknown up-to-date return value");
+            }
+            if (shouldBuild && !whatToDo.dry) {
+                return buildProject(configFileName);
+            }
+            return true;
+        }
     }
+}
+
+function processBuildQueue(graph: DependencyGraph, buildCallback: (configFileName: string, status: UpToDateStatus) => boolean) {
+    const buildQueue = clone2DArray<string>(graph.buildQueue);
+    const dependencyMap = graph.dependencyMap;
+
+    // A list of projects which needed to be built at some point.
+    // This is stored rather than observing the filestamps because a "dry"
+    //   build needs to correctly identify downstream projects that need
+    //   to be built when their upstream projects changed.
+    const projectsNeedingBuild: { [projFilename: string]: true } = {};
 
     while (buildQueue.length > 0) {
         const nextSet = buildQueue.pop()!;
         for (const proj of nextSet) {
-            const dependsOnUnbuiltProject = dependencyMap.getReferencesOf(proj).some(p => projectsNeedingBuild[p]);
-            const utd = checkUpToDate(parseConfigFile(proj), proj);
-            const projectName = friendlyNameOfFile(proj);
-            if (dependsOnUnbuiltProject) {
-                console.log(`Project ${projectName} is out-to-date with respect to a project it depends on`);
-            } else if (utd.result === "up-to-date") {
-                console.log(`Project ${projectName} is up-to-date with respect to its inputs`);
-                if (!whatToDo.force) continue;
-            } else if (utd.result === "missing") {
-                console.log(`Project ${projectName} has not built output file ${friendlyNameOfFile(utd.missingFile)}`);
-            } else if (utd.result === "out-of-date") {
-                console.log(`Project ${projectName} has input file ${friendlyNameOfFile(utd.newerFile)} newer than output file ${friendlyNameOfFile(utd.olderFile)}`);
+            const refs = dependencyMap.getReferencesOf(proj);
+            const unbuiltRefs = refs.filter(p => projectsNeedingBuild[p]);
+
+            let keepGoing: boolean;
+            if (unbuiltRefs.length > 0) {
+                keepGoing = buildCallback(proj, { result: "older-than-dependency", dependency: unbuiltRefs[0] });
             } else {
-                return throwIfReached(utd, "Unknown up-to-date return value");
+                const utd = checkUpToDateRelativeToInputs(parseConfigFile(proj), proj);
+                keepGoing = buildCallback(proj, utd);
+                if (utd.result !== "up-to-date") {
+                    projectsNeedingBuild[proj] = true;
+                }
             }
 
-            projectsNeedingBuild[proj] = true;
-            if (whatToDo.dry) continue;
-
-            if (!buildProject(proj)) {
-                console.log('Aborting build due to errors');
+            if (!keepGoing) {
                 return;
             }
         }
     }
 }
 
+function performRebuild(changedProject: string) {
+    const succeeded = buildProject(changedProject);
+    if (succeeded) {
+        // Build downstream projects
+        // 
+    }
+}
+
+function watchFilesForProject(configFile: string) {
+    // Watch the config file itself
+    chokidar.watch(configFile, undefined).on('change', () => {
+        console.log(`Config file ${configFile} changed; rebuilding project graph...`);
+        rebuildProjectGraph();
+    });
+    console.log(`Watching files for ${configFile}`);
+    const cfg = parseConfigFile(configFile)!;
+
+    if (cfg.wildcardDirectories) {
+        for (const dir of Object.keys(cfg.wildcardDirectories)) {
+            const opts: chokidar.WatchOptions = {
+                depth: cfg.wildcardDirectories[dir] === ts.WatchDirectoryFlags.Recursive ? 100 : 0,
+                ignoreInitial: true
+            };
+            chokidar.watch(dir, opts).on('all', (event, path) => {
+                console.log(`Rebuild ${configFile} due to ${event} on ${path}`);
+            });
+        }
+    }
+
+    for (const file of cfg.fileNames) {
+        console.log(`Watching ${file}`);
+    }
+}
+
+function rebuildProjectGraph() {
+    console.log('todo');
+}
+
 export interface DependencyGraph {
-    buildQueue: string[][];
+    buildQueue: ReadonlyArray<ReadonlyArray<string>>;
     dependencyMap: Mapper;
 }
 
 function createDependencyGraph(roots: string[]): DependencyGraph {
+    // This is a list of list of projects that need to be built.
+    // The ordering here is "backwards", i.e. the first entry in the array is the last set of projects that need to be built;
+    //   and the last entry is the first set of projects to be built.
+    // Each subarray is unordered.
+    // We traverse the reference graph from each root, then "clean" the list by removing
+    //   any entry that is duplicated to its right.
     const buildQueue: string[][] = [];
     const dependencyMap = createDependencyMapper();
     let buildQueuePosition = 0;
-    for (const root of whatToDo.roots) {
+    for (const root of roots) {
         const config = parseConfigFile(root);
         if (config === undefined) {
             throw new Error(`Could not parse ${root}`);
@@ -100,7 +176,7 @@ function createDependencyGraph(roots: string[]): DependencyGraph {
         buildQueuePosition--;
     }
 
-    removeDuplicates(buildQueue);
+    removeDuplicatesFromBuildQueue(buildQueue);
 
     return ({
         buildQueue,
@@ -126,7 +202,7 @@ function buildProject(proj: string): boolean {
     program.emit(undefined, (fileName, content) => {
         const dir = path.dirname(fileName);
         if (!fs.existsSync(dir)) {
-            fs.mkdirSync(dir);
+            mkdirp.sync(dir);
         }
         fs.writeFileSync(fileName, content, 'utf-8');
         console.log(`    * Wrote ${content.length} bytes to ${path.basename(fileName)}`);
@@ -141,12 +217,17 @@ function printBuildQueue(queue: string[][]) {
     }
 }
 
-type UpToDateResult =
+type UpToDateStatus =
+    // The project does not need to be built
     { result: "up-to-date", timestamp: number } |
+    // An expected output of this project is missing
     { result: "missing", missingFile: string } |
-    { result: "out-of-date", newerFile: string, olderFile: string };
+    // An output file is older than an input file
+    { result: "out-of-date", newerFile: string, olderFile: string } |
+    // An output file is older than a dependent project's output file
+    { result: "older-than-dependency", dependency: string };
 
-function checkUpToDate(configFile: ts.ParsedCommandLine | undefined, configFileName: string): UpToDateResult {
+function checkUpToDateRelativeToInputs(configFile: ts.ParsedCommandLine | undefined, configFileName: string): UpToDateStatus {
     if (!configFile) throw new Error("No config file");
 
     let newestInputFileTime = -Infinity;
