@@ -18,7 +18,7 @@ export interface TsBuildCommandLine {
     dry: boolean;
     watch: boolean;
     force: boolean;
-    viz: boolean;
+    viz: false | true | "deep";
 }
 
 export const yargsSetup = yargs
