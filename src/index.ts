@@ -241,7 +241,7 @@ function buildProject(proj: string): boolean {
     const configFile = parseConfigFile(proj);
     if (!configFile) throw new Error(`Failed to read config file ${proj}`);
     const program = ts.createProgram(configFile.fileNames, configFile.options);
-    console.log(`Building ${veryFriendlyName(proj)} to ${program.getCompilerOptions().outDir}...`);
+    console.log(`Building ${veryFriendlyName(proj)} to ${program.getCompilerOptions().outFile || program.getCompilerOptions().outDir}...`);
     program.emit(undefined, (fileName, content) => {
         const dir = path.dirname(fileName);
         if (!fs.existsSync(dir)) {
@@ -276,10 +276,16 @@ function isDeclarationFile(fileName: string) {
 
 function getOutputFilenames(configFileName: string) {
     const outputs: string[] = [];
-    const dependencyConfgFile = parseConfigFile(configFileName)!;
-    for (const inputFile of dependencyConfgFile.fileNames) {
+    const dependencyConfigFile = parseConfigFile(configFileName)!;
+    // Note: We do not support mixed global+module compilations.
+    // TODO: Error if this occurs
+    if (dependencyConfigFile.options.outFile) {
+        return [dependencyConfigFile.options.outFile];
+    }
+
+    for (const inputFile of dependencyConfigFile.fileNames) {
         if (!isDeclarationFile(inputFile)) {
-            outputs.push(getOutputDeclarationFileName(inputFile, dependencyConfgFile, configFileName));
+            outputs.push(getOutputDeclarationFileName(inputFile, dependencyConfigFile, configFileName));
         }
     }
     return outputs;
@@ -310,7 +316,7 @@ function checkUpToDateRelativeToInputs(configFile: ts.ParsedCommandLine | undefi
 
         // .d.ts files do not have output files
         if (!isDeclarationFile(inputFile)) {
-            const expectedOutputFile = getOutputDeclarationFileName(inputFile, configFile, configFileName);
+            const expectedOutputFile = configFile.options.outFile || getOutputDeclarationFileName(inputFile, configFile, configFileName);
             // If the output file doesn't exist, the project is out of date
             if (!ts.sys.fileExists(expectedOutputFile)) {
                 return {
@@ -343,6 +349,9 @@ function checkUpToDateRelativeToInputs(configFile: ts.ParsedCommandLine | undefi
 }
 
 function getOutputDeclarationFileName(inputFileName: string, configFile: ts.ParsedCommandLine, configFileName: string) {
+    if (!configFile.options.outDir) {
+        throw new Error(`${configFileName} must set 'outDir'`);
+    }
     const relativePath = path.relative(configFile.options.rootDir || path.dirname(configFileName), inputFileName);
     const outputPath = path.resolve(configFile.options.outDir!, relativePath);
     return outputPath.replace(/\.tsx?$/, '.d.ts');
