@@ -83,7 +83,7 @@ namespace main {
                     throwIfReached(status, "Unknown up-to-date return value");
             }
             if (shouldBuild && !whatToDo.dry) {
-                return buildProject(configFileName);
+                return buildProject(configFileName) === BuildResultFlags.None;
             }
             return true;
         }
@@ -231,26 +231,87 @@ export function parseConfigFile(fileName: string): ts.ParsedCommandLine | undefi
 
 enum BuildResultFlags {
     None = 0,
-    SyntaxErrors = 1 << 0,
-    TypeErrors  = 1 << 1,
-    DeclarationEmitErrors = 1 << 2,
-    DeclarationOutputUnchanged = 1 << 3
+    ConfigFileErrors = 1 << 0,
+    SyntaxErrors = 1 << 1,
+    TypeErrors  = 1 << 2,
+    DeclarationEmitErrors = 1 << 3,
+    DeclarationOutputUnchanged = 1 << 4
 }
 
-function buildProject(proj: string): boolean {
+function buildProject(proj: string): BuildResultFlags {
+    let resultFlags = BuildResultFlags.None;
+    resultFlags |= BuildResultFlags.DeclarationOutputUnchanged;
+
     const configFile = parseConfigFile(proj);
-    if (!configFile) throw new Error(`Failed to read config file ${proj}`);
+    if (!configFile) {
+        console.log(`Failed to read config file ${proj}`);
+        resultFlags |= BuildResultFlags.ConfigFileErrors;
+        return resultFlags;
+    }
+
+    const diagHost: ts.FormatDiagnosticsHost = {
+        getCanonicalFileName(fileName) {
+            return path.relative(path.dirname(proj), fileName);
+        },
+        getCurrentDirectory() {
+            return rootDirOfOptions(configFile.options, proj);
+        },
+        getNewLine() {
+            return '\r\n';
+        }
+    };
+
     const program = ts.createProgram(configFile.fileNames, configFile.options);
     console.log(`Building ${veryFriendlyName(proj)} to ${program.getCompilerOptions().outDir}...`);
+
+    // Don't emit anything in the presence of syntactic errors
+    const syntaxDiagnostics = program.getSyntacticDiagnostics();
+    if (syntaxDiagnostics.length) {
+        resultFlags |= BuildResultFlags.SyntaxErrors;
+        console.error(`Syntax errors in project ${veryFriendlyName(proj)}`);
+        printErrors(syntaxDiagnostics, diagHost);
+        return resultFlags;
+    }
+
+    // Don't emit .d.ts if there are decl file errors
+    const declDiagnostics = program.getDeclarationDiagnostics();
+    if (declDiagnostics.length) {
+        resultFlags |= BuildResultFlags.DeclarationEmitErrors;
+        console.error(`.d.ts emit errors in project ${veryFriendlyName(proj)}`);
+        printErrors(declDiagnostics, diagHost);
+    }
+
     program.emit(undefined, (fileName, content) => {
-        const dir = path.dirname(fileName);
-        if (!fs.existsSync(dir)) {
-            mkdirp.sync(dir);
+        mkdirp.sync(path.dirname(fileName));
+        let isUnchangedDeclFile = false;
+        if (isDeclarationFile(fileName) && (resultFlags & BuildResultFlags.DeclarationEmitErrors)) {
+            // Don't emit invalid .d.ts files
+            return;
+        }
+        if (isDeclarationFile(fileName) && fs.existsSync(fileName)) {
+            if (fs.readFileSync(fileName, 'utf-8') === content) {
+                resultFlags &= ~BuildResultFlags.DeclarationOutputUnchanged;
+                isUnchangedDeclFile = true;
+            }
         }
         fs.writeFileSync(fileName, content, 'utf-8');
-        console.log(`    * Wrote ${content.length} bytes to ${path.basename(fileName)}`);
+        console.log(`    * Wrote ${content.length} bytes to ${path.basename(fileName)}${isUnchangedDeclFile ? " (unchanged)" : ""}`);
     });
-    return true;
+
+    const semanticDiagnostics = [...program.getSemanticDiagnostics()];
+    if (semanticDiagnostics.length) {
+        resultFlags |= BuildResultFlags.TypeErrors;
+        console.error(`Type errors in project ${veryFriendlyName(proj)}`);
+        printErrors(semanticDiagnostics, diagHost);
+    }
+
+    return resultFlags;
+}
+
+function printErrors(arr: ReadonlyArray<ts.Diagnostic>, host: ts.FormatDiagnosticsHost) {
+    for (const err of arr) {
+        console.log(ts.formatDiagnostic(err, host));
+    }
 }
 
 function printBuildQueue(queue: string[][]) {
@@ -343,7 +404,11 @@ function checkUpToDateRelativeToInputs(configFile: ts.ParsedCommandLine | undefi
 }
 
 function getOutputDeclarationFileName(inputFileName: string, configFile: ts.ParsedCommandLine, configFileName: string) {
-    const relativePath = path.relative(configFile.options.rootDir || path.dirname(configFileName), inputFileName);
+    const relativePath = path.relative(rootDirOfOptions(configFile.options, configFileName), inputFileName);
     const outputPath = path.resolve(configFile.options.outDir!, relativePath);
     return outputPath.replace(/\.tsx?$/, '.d.ts');
+}
+
+function rootDirOfOptions(opts: ts.CompilerOptions, configFileName: string) {
+    return opts.rootDir || path.dirname(configFileName);
 }
