@@ -1,5 +1,5 @@
 import fs = require('fs');
-import { normalize } from 'path';
+import { normalize, relative } from 'path';
 import path = require('path');
 
 import mkdirp = require('mkdirp');
@@ -12,7 +12,6 @@ import { createDependencyMapper, Mapper, __ } from './dependency-map';
 import { wrapSingle, removeDuplicatesFromBuildQueue, friendlyNameOfFile, throwIfReached, resolvePathRelativeToCwd, veryFriendlyName, clone2DArray, flatten, getCanonicalFileName } from './utils';
 import { yargsSetup, parseCommandline, TsBuildCommandLine } from './command-line';
 import { renderGraphVisualization } from './visualizer';
-import { callbackify } from 'util';
 
 const host = ts.createCompilerHost({});
 const watchers: chokidar.FSWatcher[] = [];
@@ -24,12 +23,12 @@ namespace main {
     function main(whatToDo: TsBuildCommandLine) {
         let graph = createDependencyGraph(whatToDo.roots);
 
-        processBuildQueue(graph, handleBuildStatus);
-
         if (whatToDo.viz) {
             renderGraphVisualization(whatToDo.roots, graph, 'project-graph.svg', whatToDo.viz === 'deep');
             return;
         }
+
+        processBuildQueue(graph, handleBuildStatus);
 
         if (whatToDo.watch) {
             console.log("Watching for file changes...");
@@ -83,7 +82,8 @@ namespace main {
                     throwIfReached(status, "Unknown up-to-date return value");
             }
             if (shouldBuild && !whatToDo.dry) {
-                return buildProject(configFileName) === BuildResultFlags.None;
+                const result = buildProject(configFileName);
+                return (result & BuildResultFlags.Errors) === BuildResultFlags.None;
             }
             return true;
         }
@@ -199,7 +199,7 @@ function createDependencyGraph(roots: string[]): DependencyGraph {
             myBuildLevel.push(fileName);
         }
 
-        const refs = ts.getProjectReferences(host, root.options);
+        const refs = ts.getProjectReferenceFileNames(host, root.options);
         if (refs === undefined) return;
         buildQueuePosition++;
         for (const ref of refs) {
@@ -235,7 +235,9 @@ enum BuildResultFlags {
     SyntaxErrors = 1 << 1,
     TypeErrors  = 1 << 2,
     DeclarationEmitErrors = 1 << 3,
-    DeclarationOutputUnchanged = 1 << 4
+    DeclarationOutputUnchanged = 1 << 4,
+
+    Errors = ConfigFileErrors | SyntaxErrors | TypeErrors | DeclarationEmitErrors
 }
 
 function buildProject(proj: string): BuildResultFlags {
@@ -262,26 +264,30 @@ function buildProject(proj: string): BuildResultFlags {
     };
 
     const program = ts.createProgram(configFile.fileNames, configFile.options);
-    console.log(`Building ${veryFriendlyName(proj)} to ${program.getCompilerOptions().outDir}...`);
 
-    // Don't emit anything in the presence of syntactic errors
-    const syntaxDiagnostics = program.getSyntacticDiagnostics();
+    const outputName = getFriendlyOutputName(configFile.options);
+    console.log(`Building ${veryFriendlyName(proj)} to ${outputName}...`);
+
+    // Don't emit anything in the presence of syntactic errors or options diagnostics
+    const syntaxDiagnostics = [...program.getOptionsDiagnostics(), ...program.getSyntacticDiagnostics()];
     if (syntaxDiagnostics.length) {
         resultFlags |= BuildResultFlags.SyntaxErrors;
-        console.error(`Syntax errors in project ${veryFriendlyName(proj)}`);
+        console.error(`Syntax/options errors in project ${veryFriendlyName(proj)}`);
         printErrors(syntaxDiagnostics, diagHost);
         return resultFlags;
     }
 
     // Don't emit .d.ts if there are decl file errors
-    const declDiagnostics = program.getDeclarationDiagnostics();
-    if (declDiagnostics.length) {
-        resultFlags |= BuildResultFlags.DeclarationEmitErrors;
-        console.error(`.d.ts emit errors in project ${veryFriendlyName(proj)}`);
-        printErrors(declDiagnostics, diagHost);
+    if (program.getCompilerOptions().declaration) {
+        const declDiagnostics = program.getDeclarationDiagnostics();
+        if (declDiagnostics.length) {
+            resultFlags |= BuildResultFlags.DeclarationEmitErrors;
+            console.error(`.d.ts emit errors in project ${veryFriendlyName(proj)}`);
+            printErrors(declDiagnostics, diagHost);
+        }
     }
 
-    program.emit(undefined, (fileName, content) => {
+    const emitResult = program.emit(undefined, (fileName, content) => {
         mkdirp.sync(path.dirname(fileName));
         let isUnchangedDeclFile = false;
         if (isDeclarationFile(fileName) && (resultFlags & BuildResultFlags.DeclarationEmitErrors)) {
@@ -362,7 +368,7 @@ function checkUpToDateRelativeToInputs(configFile: ts.ParsedCommandLine | undefi
     let newestOutputFileTime = -1;
 
     const allInputs = [...configFile.fileNames];
-    for (const ref of ts.getProjectReferences(host, configFile.options) || []) {
+    for (const ref of ts.getProjectReferenceFileNames(host, configFile.options) || []) {
         for (const output of getOutputFilenames(ref)) {
             allInputs.push(output);
         }
@@ -420,4 +426,12 @@ function getOutputDeclarationFileName(inputFileName: string, configFile: ts.Pars
 
 function rootDirOfOptions(opts: ts.CompilerOptions, configFileName: string) {
     return opts.rootDir || path.dirname(configFileName);
+}
+
+function getFriendlyOutputName(opts: ts.CompilerOptions): string {
+    if (opts.outFile) {
+        return friendlyNameOfFile(opts.outFile);
+    } else {
+        return friendlyNameOfFile(opts.outDir!);
+    }
 }
