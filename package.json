@@ -2,10 +2,13 @@
   "name": "@ryancavanaugh/tsbuild",
   "version": "0.1.0",
   "description": "Reference Implementation for TypeScript Composite Project Build Orchestration",
-  "main": "index.js",
+  "main": "./bin/index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
+  "files": [
+    "bin"
+  ],
   "bin": {
     "tsbuild": "./bin/index.js"
   },
