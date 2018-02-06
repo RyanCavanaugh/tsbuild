@@ -4,6 +4,7 @@
   "description": "Reference Implementation for TypeScript Composite Project Build Orchestration",
   "main": "./bin/index.js",
   "scripts": {
+    "prepublishOnly": "tsc",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "files": [
