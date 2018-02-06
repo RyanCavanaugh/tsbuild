@@ -1,18 +1,21 @@
 {
-  "name": "tsbuild",
+  "name": "@ryancavanaugh/tsbuild",
   "version": "1.0.0",
   "description": "Reference Implementation for TypeScript Composite Project Build Orchestration",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
+  "bin": {
+    "tsbuild": "./bin/index.js"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/RyanCavanaugh/tsbuild.git"
   },
   "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "author": "Ryan Cavanaugh <ryanca@microsoft.com>",
+  "license": "Apache-2.0",
   "bugs": {
     "url": "https://github.com/RyanCavanaugh/tsbuild/issues"
   },
