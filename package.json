@@ -1,6 +1,6 @@
 {
   "name": "@ryancavanaugh/tsbuild",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Reference Implementation for TypeScript Composite Project Build Orchestration",
   "main": "index.js",
   "scripts": {
