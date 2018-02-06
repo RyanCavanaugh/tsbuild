@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import fs = require('fs');
 import { normalize, relative } from 'path';
 import path = require('path');
