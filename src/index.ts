@@ -6,7 +6,7 @@ import path = require('path');
 
 import mkdirp = require('mkdirp');
 import minimist = require('minimist');
-import ts = require('typescript');
+import ts = require('@ryancavanaugh/typescript');
 import chokidar = require('chokidar');
 import glob = require('glob');
 

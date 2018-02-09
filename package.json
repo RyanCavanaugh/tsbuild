@@ -25,11 +25,11 @@
   },
   "homepage": "https://github.com/RyanCavanaugh/tsbuild#readme",
   "dependencies": {
+    "@ryancavanaugh/typescript": "^2.7.0",
     "chokidar": "^2.0.0",
     "glob": "^7.1.2",
     "minimist": "^1.2.0",
     "mkdirp": "^0.5.1",
-    "typescript": "^2.7.0-dev.20180112",
     "viz.js": "^1.8.0",
     "yargs": "^10.1.1"
   },
