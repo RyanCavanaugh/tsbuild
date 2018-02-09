@@ -1,8 +1,8 @@
 import fs = require('fs');
 import path = require('path');
 import viz = require('viz.js');
-import { DependencyGraph, parseConfigFile } from './index';
-import { veryFriendlyName } from './utils';
+import { DependencyGraph } from './index';
+import { veryFriendlyName, parseConfigFile } from './utils';
 
 
 export function renderGraphVisualization(roots: string[], graph: DependencyGraph, fileName: string, deep: boolean = false) {

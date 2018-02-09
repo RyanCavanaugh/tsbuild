@@ -1,5 +1,8 @@
 # tsbuild: A Reference Implementation for TypeScript Composite Project Build Orchestration
 
+## Installation
+
+> `npm install -g @ryancavanaugh/tsbuild`
 
 ## Usage Examples
 
@@ -15,4 +18,13 @@ Show what would be built.
 
 Build exactly these two projects.
 
+## Options
 
+```
+  --help       Show help                                  
+  --version    Show version number                        
+  --watch, -w  Watch mode                                 
+  --dry, -d    Dry mode: Show what would be built and exit
+  --force, -f  Force rebuild of all projects              
+  --viz        Render a project dependency graph
+```

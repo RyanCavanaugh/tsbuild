@@ -1,4 +1,15 @@
 import path = require('path');
+import ts = require('@ryancavanaugh/typescript');
+
+export function parseConfigFile(fileName: string): ts.ParsedCommandLine | undefined {
+    const rawFileContent = ts.sys.readFile(fileName, 'utf-8');
+    if (rawFileContent === undefined) {
+        return undefined;
+    }
+    const parsedFileContent = ts.parseJsonText(fileName, rawFileContent);
+    const configParseResult = ts.parseJsonSourceFileConfigFileContent(parsedFileContent, ts.sys, path.dirname(fileName), /*optionsToExtend*/ undefined, fileName);
+    return configParseResult;
+}
 
 export function getCanonicalFileName(fileName: string) {
     fileName = path.resolve(fileName);

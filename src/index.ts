@@ -11,86 +11,13 @@ import chokidar = require('chokidar');
 import glob = require('glob');
 
 import { createDependencyMapper, Mapper, __ } from './dependency-map';
-import { wrapSingle, removeDuplicatesFromBuildQueue, friendlyNameOfFile, throwIfReached, resolvePathRelativeToCwd, veryFriendlyName, clone2DArray, flatten, getCanonicalFileName } from './utils';
+import { wrapSingle, removeDuplicatesFromBuildQueue, friendlyNameOfFile, throwIfReached, resolvePathRelativeToCwd, veryFriendlyName, clone2DArray, flatten, getCanonicalFileName, parseConfigFile } from './utils';
 import { yargsSetup, parseCommandline, TsBuildCommandLine } from './command-line';
 import { renderGraphVisualization } from './visualizer';
 
 const host = ts.createCompilerHost({});
 const watchers: chokidar.FSWatcher[] = [];
-
-namespace main {
-    const whatToDo = parseCommandline(yargsSetup.parse());
-    setImmediate(() => main(whatToDo));
-
-    function main(whatToDo: TsBuildCommandLine) {
-        let graph = createDependencyGraph(whatToDo.roots);
-
-        if (whatToDo.viz) {
-            renderGraphVisualization(whatToDo.roots, graph, 'project-graph.svg', whatToDo.viz === 'deep');
-            return;
-        }
-
-        processBuildQueue(graph, handleBuildStatus);
-
-        if (whatToDo.watch) {
-            console.log("Watching for file changes...");
-            for (const proj of flatten(graph.buildQueue)) {
-                watchFilesForProject(proj, {
-                    rebuildProject,
-                    rebuildGraph
-                });
-            }
-        }
-
-        function rebuildProject(projectName: string) {
-            // We can just rerun the whole build queue; the right thing will happen
-            processBuildQueue(graph, handleBuildStatus, { quiet: true });
-        }
-
-        function rebuildGraph() {
-            console.log('Rebuilding project graph due to an edit in a config file');
-            graph = createDependencyGraph(whatToDo.roots);
-            for (const w of watchers) {
-                w.close();
-            }
-            watchers.length = 0;
-            for (const proj of flatten(graph.buildQueue)) {
-                watchFilesForProject(proj, {
-                    rebuildProject,
-                    rebuildGraph
-                });
-            }
-            processBuildQueue(graph, handleBuildStatus);
-        }
-
-        function handleBuildStatus(configFileName: string, status: UpToDateStatus, opts: BuildOptions): boolean {
-            const projectName = friendlyNameOfFile(configFileName);
-            let shouldBuild: boolean = true;
-            switch (status.result) {
-                case "older-than-dependency":
-                    opts.quiet || console.log(`Project ${projectName} is out-to-date with respect to its dependency ${friendlyNameOfFile(status.dependency)}`);
-                    break;
-                case "missing":
-                    opts.quiet || console.log(`Project ${projectName} has not built output file ${friendlyNameOfFile(status.missingFile)}`);
-                    break;
-                case "out-of-date":
-                    opts.quiet || console.log(`Project ${projectName} has input file ${friendlyNameOfFile(status.newerFile)} newer than output file ${friendlyNameOfFile(status.olderFile)}`);
-                    break;
-                case "up-to-date":
-                    opts.quiet || console.log(`Project ${projectName} is up-to-date with respect to its inputs`);
-                    shouldBuild = whatToDo.force;
-                    break;
-                default:
-                    throwIfReached(status, "Unknown up-to-date return value");
-            }
-            if (shouldBuild && !whatToDo.dry) {
-                const result = buildProject(configFileName);
-                return (result & BuildResultFlags.Errors) === BuildResultFlags.None;
-            }
-            return true;
-        }
-    }
-}
+let doVerbose = false;
 
 interface WatchCallbacks {
     rebuildProject(configFileName: string, changedFile: string): void;
@@ -221,21 +148,11 @@ function createDependencyGraph(roots: string[]): DependencyGraph {
     });
 }
 
-export function parseConfigFile(fileName: string): ts.ParsedCommandLine | undefined {
-    const rawFileContent = ts.sys.readFile(fileName, 'utf-8');
-    if (rawFileContent === undefined) {
-        return undefined;
-    }
-    const parsedFileContent = ts.parseJsonText(fileName, rawFileContent);
-    const configParseResult = ts.parseJsonSourceFileConfigFileContent(parsedFileContent, ts.sys, path.dirname(fileName), /*optionsToExtend*/ undefined, fileName);
-    return configParseResult;
-}
-
 enum BuildResultFlags {
     None = 0,
     ConfigFileErrors = 1 << 0,
     SyntaxErrors = 1 << 1,
-    TypeErrors  = 1 << 2,
+    TypeErrors = 1 << 2,
     DeclarationEmitErrors = 1 << 3,
     DeclarationOutputUnchanged = 1 << 4,
 
@@ -360,8 +277,15 @@ function getOutputFilenames(configFileName: string) {
     return outputs;
 }
 
+function toShortTime(time: number) {
+    const d = new Date(time);
+    return `${d.toLocaleDateString()} ${d.toLocaleTimeString()}`;
+}
+
 function checkUpToDateRelativeToInputs(configFile: ts.ParsedCommandLine | undefined, configFileName: string): UpToDateStatus {
     if (!configFile) throw new Error("No config file");
+
+    verbose(`Checking up-to-date status of ${configFileName}`);
 
     let newestInputFileTime = -Infinity;
     let newestInputFileName = "????";
@@ -370,45 +294,61 @@ function checkUpToDateRelativeToInputs(configFile: ts.ParsedCommandLine | undefi
     let newestOutputFileTime = -1;
 
     const allInputs = [...configFile.fileNames];
+
     for (const ref of ts.getProjectReferenceFileNames(host, configFile.options) || []) {
         for (const output of getOutputFilenames(ref)) {
             allInputs.push(output);
         }
     }
 
+    const allOutputs: string[] = [];
     for (const inputFile of allInputs) {
         const inputFileTime = fs.statSync(inputFile).mtimeMs;
+        console.log(`Input file ${inputFile} last updated at ${toShortTime(inputFileTime)}`);
         if (inputFileTime > newestInputFileTime) {
             newestInputFileTime = inputFileTime;
             newestInputFileName = inputFile;
         }
 
-        // .d.ts files do not have output files
-        if (!isDeclarationFile(inputFile)) {
-            const expectedOutputFile = configFile.options.outFile || getOutputDeclarationFileName(inputFile, configFile, configFileName);
-            // If the output file doesn't exist, the project is out of date
-            if (!ts.sys.fileExists(expectedOutputFile)) {
-                return {
-                    result: "missing",
-                    missingFile: expectedOutputFile
-                };
+        // .d.ts files do not have output files or JS file outputs
+        if (!configFile.options.outFile && !isDeclarationFile(inputFile)) {
+            if (configFile.options.declaration) {
+                allOutputs.push(getOutputDeclarationFileName(inputFile, configFile, configFileName));
             }
-
-            const outputFileTime = fs.statSync(expectedOutputFile).mtimeMs;
-            if (outputFileTime < oldestOutputFileTime) {
-                oldestOutputFileTime = outputFileTime;
-                oldestOutputFileName = expectedOutputFile;
-            }
-            newestOutputFileTime = Math.max(newestOutputFileTime, outputFileTime);
+            allOutputs.push(getOutputJavaScriptFileName(inputFile, configFile, configFileName));
         }
+    }
 
-        if (newestInputFileTime > oldestOutputFileTime) {
+    if (configFile.options.outFile) {
+        if (configFile.options.declaration) {
+            allOutputs.push(configFile.options.outFile.replace(/\.js$/, '.d.ts'));
+        }
+        allOutputs.push(configFile.options.outFile);
+    }
+
+    for (const expectedOutputFile of allOutputs) {
+        // If the output file doesn't exist, the project is out of date
+        if (!ts.sys.fileExists(expectedOutputFile)) {
             return {
-                result: "out-of-date",
-                newerFile: newestInputFileName,
-                olderFile: oldestOutputFileName
+                result: "missing",
+                missingFile: expectedOutputFile
             };
         }
+
+        const outputFileTime = fs.statSync(expectedOutputFile).mtimeMs;
+        if (outputFileTime < oldestOutputFileTime) {
+            oldestOutputFileTime = outputFileTime;
+            oldestOutputFileName = expectedOutputFile;
+        }
+        newestOutputFileTime = Math.max(newestOutputFileTime, outputFileTime);
+    }
+
+    if (newestInputFileTime > oldestOutputFileTime) {
+        return {
+            result: "out-of-date",
+            newerFile: newestInputFileName,
+            olderFile: oldestOutputFileName
+        };
     }
 
     return {
@@ -418,12 +358,21 @@ function checkUpToDateRelativeToInputs(configFile: ts.ParsedCommandLine | undefi
 }
 
 function getOutputDeclarationFileName(inputFileName: string, configFile: ts.ParsedCommandLine, configFileName: string) {
+    return getRelativeOutputFileName(inputFileName, configFile, configFileName).replace(/\.tsx?$/, '.d.ts');
+}
+
+function getOutputJavaScriptFileName(inputFileName: string, configFile: ts.ParsedCommandLine, configFileName: string) {
+    // TODO handle JSX: Preserve
+    return getRelativeOutputFileName(inputFileName, configFile, configFileName).replace(/\.tsx?$/, '.js');
+}
+
+function getRelativeOutputFileName(inputFileName: string, configFile: ts.ParsedCommandLine, configFileName: string) {
     const relativePath = path.relative(rootDirOfOptions(configFile.options, configFileName), inputFileName);
     if (!configFile.options.outDir) {
         throw new Error(`${configFileName} must set 'outDir'`);
     }
     const outputPath = path.resolve(configFile.options.outDir!, relativePath);
-    return outputPath.replace(/\.tsx?$/, '.d.ts');
+    return outputPath;
 }
 
 function rootDirOfOptions(opts: ts.CompilerOptions, configFileName: string) {
@@ -435,5 +384,87 @@ function getFriendlyOutputName(opts: ts.CompilerOptions): string {
         return friendlyNameOfFile(opts.outFile);
     } else {
         return friendlyNameOfFile(opts.outDir!);
+    }
+}
+
+function verbose(message: string) {
+    if (doVerbose) {
+        console.log(message);
+    }
+}
+
+namespace main {
+    console.log(`tsbuild@${require('../package.json').version} + typescript@${ts.version}`);
+    const whatToDo = parseCommandline(yargsSetup.parse());
+    doVerbose = whatToDo.verbose;
+    main(whatToDo);
+
+    function main(whatToDo: TsBuildCommandLine) {
+        let graph = createDependencyGraph(whatToDo.roots);
+
+        if (whatToDo.viz) {
+            renderGraphVisualization(whatToDo.roots, graph, 'project-graph.svg', whatToDo.viz === 'deep');
+            return;
+        }
+
+        processBuildQueue(graph, handleBuildStatus);
+
+        if (whatToDo.watch) {
+            console.log("Watching for file changes...");
+            for (const proj of flatten(graph.buildQueue)) {
+                watchFilesForProject(proj, {
+                    rebuildProject,
+                    rebuildGraph
+                });
+            }
+        }
+
+        function rebuildProject(projectName: string) {
+            // We can just rerun the whole build queue; the right thing will happen
+            processBuildQueue(graph, handleBuildStatus, { quiet: true });
+        }
+
+        function rebuildGraph() {
+            console.log('Rebuilding project graph due to an edit in a config file');
+            graph = createDependencyGraph(whatToDo.roots);
+            for (const w of watchers) {
+                w.close();
+            }
+            watchers.length = 0;
+            for (const proj of flatten(graph.buildQueue)) {
+                watchFilesForProject(proj, {
+                    rebuildProject,
+                    rebuildGraph
+                });
+            }
+            processBuildQueue(graph, handleBuildStatus);
+        }
+
+        function handleBuildStatus(configFileName: string, status: UpToDateStatus, opts: BuildOptions): boolean {
+            const projectName = friendlyNameOfFile(configFileName);
+            let shouldBuild: boolean = true;
+            switch (status.result) {
+                case "older-than-dependency":
+                    opts.quiet || console.log(`Project ${projectName} is out-to-date with respect to its dependency ${friendlyNameOfFile(status.dependency)}`);
+                    break;
+                case "missing":
+                    opts.quiet || console.log(`Project ${projectName} has not built output file ${friendlyNameOfFile(status.missingFile)}`);
+                    break;
+                case "out-of-date":
+                    opts.quiet || console.log(`Project ${projectName} has input file ${friendlyNameOfFile(status.newerFile)} newer than output file ${friendlyNameOfFile(status.olderFile)}`);
+                    break;
+                case "up-to-date":
+                    opts.quiet || console.log(`Project ${projectName} is up-to-date with respect to its inputs`);
+                    shouldBuild = whatToDo.force;
+                    break;
+                default:
+                    throwIfReached(status, "Unknown up-to-date return value");
+            }
+            if (shouldBuild && !whatToDo.dry) {
+                const result = buildProject(configFileName);
+                return (result & BuildResultFlags.Errors) === BuildResultFlags.None;
+            }
+            return true;
+        }
     }
 }

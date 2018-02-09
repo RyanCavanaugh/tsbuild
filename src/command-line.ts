@@ -10,6 +10,7 @@ export type YargsCommandLine = yargs.Arguments & {
     watch?: boolean;
     force?: boolean;
     viz?: boolean;
+    verbose?: boolean;
     project?: string | string[];
 };
 
@@ -18,11 +19,12 @@ export interface TsBuildCommandLine {
     dry: boolean;
     watch: boolean;
     force: boolean;
+    verbose: boolean;
     viz: false | true | "deep";
 }
 
 export const yargsSetup = yargs
-    .usage('$0 [options] [proj1] [dir1] ...')
+    .usage('tsbuild [options] [proj1] [dir1] ...')
     .option('watch', {
         alias: 'w',
         default: false,
@@ -37,6 +39,10 @@ export const yargsSetup = yargs
         alias: 'f',
         default: false,
         description: "Force rebuild of all projects"
+    })
+    .option('verbose', {
+        default: false,
+        description: "Enable verbose logging"
     })
     .options('viz', {
         default: false,
@@ -67,7 +73,8 @@ export function parseCommandline(cmdLine: YargsCommandLine): TsBuildCommandLine 
         dry: cmdLine.dry || false,
         watch: cmdLine.watch || false,
         force: cmdLine.force || false,
-        viz: cmdLine.viz || false
+        viz: cmdLine.viz || false,
+        verbose: cmdLine.verbose || false
     };
 
     function addInferred(unknown: string) {
