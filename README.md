@@ -28,3 +28,49 @@ Build exactly these two projects.
   --force, -f  Force rebuild of all projects              
   --viz        Render a project dependency graph
 ```
+
+# Dogfooding Instructions
+
+### Installation
+
+ > `npm install -g @ryancavanaugh/tsbuild`
+
+### Running
+
+Once you've `npm install`ed, you can run `tsbuild` from the commandline.
+See usage info above.
+
+### Language Service Dogfooding
+
+This is a bit more involved. You can do the following:
+
+> ```
+> git clone https://github.com/RyanCavanaugh/TypeScript.git
+> cd TypeScript
+> git checkout projectReferences
+> npm install
+> jake local
+> ```
+
+Once this is done, you can point VS Code's TypeScript install to the /built/local folder of the enlistment root:
+```
+    "typescript.tsdk": "C:/github/TypeScript/built/local/",
+    "typescript.tsdk_version": "2.6.0", 
+```
+Then select this version using the "TypeScript: Select TypeScript Version" command while a .ts file is open.
+
+### Setup
+
+The main thing to do is to add a 'references' block to your tsconfig file:
+```ts
+    "references": [
+      { "path": "../otherProj" }
+    ]
+```
+Each element in the array points to a `tsconfig` file or a folder containing a file named `tsconfig.json`.
+
+The demo repo https://github.com/RyanCavanaugh/project-references-demo-2 is a buildable example that uses project references to set up a dozen projects in a complex graph.
+
+### Feedback
+
+Please include the full version number (printed at the top of every invocation) with any bug reports. I'll be publishing updates to the NPM package as I fix things / add features, so you may want to run 'npm update -g @ryancavanaugh/tsbuild' every so often to pick up the latest build.
