@@ -49,6 +49,7 @@ This is a bit more involved. You can do the following:
 > cd TypeScript
 > git checkout projectReferences
 > npm install
+> npm install -g jake
 > jake local
 > ```
 
