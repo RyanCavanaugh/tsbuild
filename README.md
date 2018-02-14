@@ -75,3 +75,21 @@ The demo repo https://github.com/RyanCavanaugh/project-references-demo-2 is a bu
 ### Feedback
 
 Please include the full version number (printed at the top of every invocation) with any bug reports. I'll be publishing updates to the NPM package as I fix things / add features, so you may want to run 'npm update -g @ryancavanaugh/tsbuild' every so often to pick up the latest build.
+
+# Changelog and Backlog
+
+### Upcoming work
+
+ * [ ] Reduce I/O on tsconfig.json files - current implementation reads these from disk more than once per build
+ * [ ] (TS) remove restriction on zero-input-file compilations
+ * [ ] Figure out what to do with `stripInternal`
+ * [ ] Figure out what to do with declaration bundling in `prepend`+`outFile` combinations
+
+### Release Log
+
+ * 0.1.5
+   * Implements pseduobuilds
+     * A pseudobuild (PB) occurs when an upstream project is rebuilt but doesn't change its .d.ts. When this happens, downstream projects' outputs are 'touched' to the current time.
+     * PBs are not enabled for `outFile` compilations because the output JS file still needs to be updated (TODO: we can allow this if there are no `prepend` references)
+ * 0.1.4
+     * Initial release
