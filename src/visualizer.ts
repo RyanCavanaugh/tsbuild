@@ -4,7 +4,6 @@ import viz = require('viz.js');
 import { DependencyGraph } from './index';
 import { veryFriendlyName, parseConfigFile } from './utils';
 
-
 export function renderGraphVisualization(roots: string[], graph: DependencyGraph, fileName: string, deep: boolean = false) {
     const { buildQueue, dependencyMap } = graph;
     const lines: string[] = [];
