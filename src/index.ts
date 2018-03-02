@@ -276,6 +276,8 @@ function printBuildQueue(queue: string[][]) {
 }
 
 type UpToDateStatus =
+    // Something (e.g. missing file or syntax error) has blocked build
+    { result: "unbuildable" } |
     // The project does not need to be built.
     // "timestamp" is the time of the newest input file
     { result: "up-to-date", timestamp: Date } |
@@ -333,7 +335,13 @@ function checkUpToDateRelativeToInputs(configFile: ts.ParsedCommandLine | undefi
     const allOutputs: string[] = [];
     let newestInputFileTime = -Infinity;
     let newestInputFileName = "????";
+    let missingFile = false;
     for (const inputFile of configFile.fileNames) {
+        if (!fs.existsSync(inputFile)) {
+            console.error(`Listed input file ${inputFile} from ${configFileName} does not exist`);
+            missingFile = true;
+            continue;
+        }
         const inputTime = fs.statSync(inputFile).mtimeMs;
         verbose(`Source input file ${inputFile} last updated at ${toShortTime(inputTime)}`);
         if (inputTime > newestInputFileTime) {
@@ -347,6 +355,11 @@ function checkUpToDateRelativeToInputs(configFile: ts.ParsedCommandLine | undefi
             }
             allOutputs.push(getOutputJavaScriptFileName(inputFile, configFile, configFileName));
         }
+    }
+    if (missingFile) {
+        return {
+            result: "unbuildable"
+        };
     }
 
     // Potential outFile outputs
@@ -554,6 +567,9 @@ namespace main {
                     opts.quiet || console.log(`Project ${projectName}'s dependencies were rebuilt, but didn't change .d.ts. Performing pseudobuild`);
                     pseudoBuildTime = status.timestamp;
                     break;
+                case "unbuildable":
+                    opts.quiet || console.log(`Cannot continue build`);
+                    return false;
                 default:
                     throwIfReached(status, "Unknown up-to-date return value");
             }
