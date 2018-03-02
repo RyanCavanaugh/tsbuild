@@ -26,7 +26,7 @@
   },
   "homepage": "https://github.com/RyanCavanaugh/tsbuild#readme",
   "dependencies": {
-    "@ryancavanaugh/typescript": "next",
+    "@ryancavanaugh/typescript": "^2.8.0-projrefbeta3",
     "chokidar": "^2.0.0",
     "glob": "^7.1.2",
     "minimist": "^1.2.0",
