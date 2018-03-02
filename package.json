@@ -11,7 +11,8 @@
     "bin"
   ],
   "bin": {
-    "tsbuild": "./bin/index.js"
+    "tsbuild": "./bin/index.js",
+    "tscx": "./bin/index.js"
   },
   "repository": {
     "type": "git",
