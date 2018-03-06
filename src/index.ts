@@ -18,7 +18,8 @@ import FileMap from './file-map';
 
 const host = ts.createCompilerHost({});
 const watchers: chokidar.FSWatcher[] = [];
-let doVerbose = false;
+let beVerbose = false;
+let beQuiet = false;
 
 interface WatchCallbacks {
     rebuildProject(configFileName: string, changedFile: string): void;
@@ -166,19 +167,111 @@ enum BuildResultFlags {
     Errors = ConfigFileErrors | SyntaxErrors | TypeErrors | DeclarationEmitErrors
 }
 
-function performPseudoBuild(proj: string, timestamp: Date, context: BuildContext): void {
+function tryPseudoBuild(proj: string, timestamp: Date, context: BuildContext): boolean {
     const configFile = parseConfigFile(proj);
     // TODO throw or something
-    if (!configFile) return;
+    if (!configFile) return false;
+
+    const refs = configFile.options.references;
+    if (refs && refs.some(r => !!(r && r.prepend))) {
+        const couldReuse = tryReusePrependedBuild(proj, configFile, timestamp, context);
+        if (couldReuse) {
+            unquiet(`Fast-rebuilt ${proj} from its prior output`);
+            
+            // If we successfully rebuilt, we do need to touch the .d.ts output - it will be unchanged, but appear out-of-date
+            const dtsFileName = getAllOutputFilenames(proj).filter(f => /\.d\.ts$/i.test(f))[0];
+            if (dtsFileName !== undefined) {
+                const oldTime = updateTimestamp(dtsFileName, new Date());
+                context.unchangedOutputs.setValue(dtsFileName, oldTime);
+            }
+            return true;
+        } else {
+            // Need to issue a rebuild for this output to be correct
+            return false;
+        }
+    }
 
     const outputs = getAllOutputFilenames(proj);
     const now = new Date();
     for (const output of outputs) {
-        verbose(` * Touch file ${output} to ${toShortTime(timestamp)}`)
-        const oldTime = fs.statSync(output).mtimeMs;
-        fs.utimesSync(output, now, now);
+        const oldTime = updateTimestamp(output, now);
         context.unchangedOutputs.setValue(output, oldTime);
     }
+    return true;
+}
+
+// Returns the prior modified timestamp value (in milliseconds)
+function updateTimestamp(fileName: string, date: Date): number {
+    verbose(` * Update timestamp of ${fileName} to ${toShortTime(date)}`)
+    const oldTime = fs.statSync(fileName).mtimeMs;
+    fs.utimesSync(fileName, date, date);
+    return oldTime;
+}
+
+// A pseudobuild of an outFile compilation with prepends is actually incorrect; the prior
+// JS content of the file will be the 'old' content from the upstream project.
+// If we detect this situation, we need to fish out the original downstream project output
+// from the output file using the bundle_info file, then reconstruct a new concatenation
+// of the output file.
+// But if any of this wizardry fails, we can just fall back to a vanilla build
+function tryReusePrependedBuild(proj: string, configFile: ts.ParsedCommandLine, timestamp: Date, context: BuildContext): boolean {
+    const outFilePath = getOutFileName(proj, configFile);
+    if (!fs.existsSync(outFilePath)) return false;
+    const bundleInfoPath = getOutFileName(proj, configFile, ".bundle_info");
+    if (!fs.existsSync(bundleInfoPath)) return false;
+
+    const bundleInfo = JSON.parse(fs.readFileSync(bundleInfoPath, { encoding: 'utf-8' }));
+    const outFileContent = fs.readFileSync(outFilePath, { encoding: 'utf-8' });
+    if (outFileContent.length !== bundleInfo.totalLength) {
+        unquiet(`WARNING: Fast re-use of ${outFilePath} skipped because its saved length ${bundleInfo.totalLength} didn't match its actual length ${outFileContent.length}`);
+        return false;
+    }
+
+    // Get the non-prepend content from the outFile
+    const originalContent = outFileContent.substr(bundleInfo.originalOffset);
+    // Read all the prior outFiles from disk
+    // TODO: We could save them in-memory since we know (?) they recently happened?
+    let output = "";
+    for (const ref of configFile.options.references!) {
+        const refPath = resolveReferenceToConfigFileName(proj, ref);
+        const refConfigFile = parseConfigFile(refPath);
+        const referenceOutFile = getOutFileName(refPath, refConfigFile!);
+        output = fs.readFileSync(referenceOutFile, { encoding: 'utf-8'}) + output;
+    }
+    // Compute the updated bundle info
+    const newBundleInfo: any = { originalOffset: output.length };
+    output = output + originalContent;
+    writeFileWithNotification(outFilePath, output);
+    newBundleInfo.totalLength = output.length;
+    writeFileWithNotification(bundleInfoPath, JSON.stringify(newBundleInfo, undefined, 2));
+
+    return true;
+}
+
+function writeFileWithNotification(fileName: string, content: string, indent = 1, unchanged = false) {
+    fs.writeFileSync(fileName, content, { encoding: 'utf-8'});
+    unquiet(`${new Array(indent).join('  ')}* Wrote ${content.length} characters to ${path.basename(fileName)}${unchanged ? " (unchanged)" : ""}`);
+}
+
+function resolveReferenceToConfigFileName(referencingConfigFileName: string, reference: ts.ProjectReference): string {
+    const expectedLocationBase = path.join(referencingConfigFileName, "..", reference.path);
+    const withTsConfig = path.join(expectedLocationBase, "tsconfig.json");
+    if (fs.existsSync(withTsConfig)) {
+        return withTsConfig;
+    }
+    return expectedLocationBase;
+}
+
+function getOutFileName(configFilePath: string, configFile: ts.ParsedCommandLine, extensionWithLeadingDot?: string): string {
+    const result = path.resolve(configFilePath, configFile.options.outFile!);
+    if (extensionWithLeadingDot === undefined) {
+        return result;
+    }
+    return changeExtension(result, extensionWithLeadingDot);
+}
+
+function changeExtension(fileName: string, extensionWithLeadingDot: string) {
+    return fileName.substr(0, fileName.lastIndexOf('.')) + extensionWithLeadingDot;
 }
 
 function buildProject(proj: string, context: BuildContext): BuildResultFlags {
@@ -187,9 +280,14 @@ function buildProject(proj: string, context: BuildContext): BuildResultFlags {
 
     const configFile = parseConfigFile(proj);
     if (!configFile) {
-        console.log(`Failed to read config file ${proj}`);
+        unquiet(`Failed to read config file ${proj}`);
         resultFlags |= BuildResultFlags.ConfigFileErrors;
         return resultFlags;
+    }
+
+    if (configFile.fileNames.length === 0) {
+        // Nothing to build - must be a solution file, basically
+        return BuildResultFlags.None;
     }
 
     const diagHost: ts.FormatDiagnosticsHost = {
@@ -207,7 +305,7 @@ function buildProject(proj: string, context: BuildContext): BuildResultFlags {
     const program = ts.createProgram(configFile.fileNames, configFile.options);
 
     const outputName = getFriendlyOutputName(configFile.options);
-    console.log(`Building ${veryFriendlyName(proj)} to ${outputName}...`);
+    unquiet(`Building ${veryFriendlyName(proj)} to ${outputName}...`);
 
     // Don't emit anything in the presence of syntactic errors or options diagnostics
     const syntaxDiagnostics = [...program.getOptionsDiagnostics(), ...program.getSyntacticDiagnostics()];
@@ -246,7 +344,7 @@ function buildProject(proj: string, context: BuildContext): BuildResultFlags {
         }
 
         fs.writeFileSync(fileName, content, 'utf-8');
-        console.log(`    * Wrote ${content.length} bytes to ${path.basename(fileName)}${isUnchangedDeclFile ? " (unchanged)" : ""}`);
+        unquiet(`    * Wrote ${content.length} bytes to ${path.basename(fileName)}${isUnchangedDeclFile ? " (unchanged)" : ""}`);
         if (isUnchangedDeclFile) {
             context.unchangedOutputs.setValue(fileName, priorChangeTime);
         }
@@ -264,14 +362,14 @@ function buildProject(proj: string, context: BuildContext): BuildResultFlags {
 
 function printErrors(arr: ReadonlyArray<ts.Diagnostic>, host: ts.FormatDiagnosticsHost) {
     for (const err of arr) {
-        console.log(ts.formatDiagnostic(err, host));
+        console.error(ts.formatDiagnostic(err, host));
     }
 }
 
 function printBuildQueue(queue: string[][]) {
-    console.log('== Build Order ==')
+    unquiet('== Build Order ==')
     for (let i = queue.length - 1; i >= 0; i--) {
-        console.log(` * ${queue[i].map(friendlyNameOfFile).join(', ')}`);
+        unquiet(` * ${queue[i].map(friendlyNameOfFile).join(', ')}`);
     }
 }
 
@@ -305,7 +403,11 @@ function getAllOutputFilenames(configFileName: string) {
     // Note: We do not support mixed global+module compilations.
     // TODO: Error if this occurs (in tsc under referenceTarget: true)
     if (dependencyConfigFile.options.outFile) {
-        return [dependencyConfigFile.options.outFile];
+        if (dependencyConfigFile.options.declaration) {
+            return [dependencyConfigFile.options.outFile, changeExtension(dependencyConfigFile.options.outFile, ".d.ts")];
+        } else {
+            return [dependencyConfigFile.options.outFile];
+        }
     }
 
     for (const inputFile of dependencyConfigFile.fileNames) {
@@ -326,10 +428,6 @@ function checkUpToDateRelativeToInputs(configFile: ts.ParsedCommandLine | undefi
     if (!configFile) throw new Error("No config file");
 
     verbose(`Checking up-to-date status of ${configFileName}`);
-
-    // This tracks if we've relied the "new file is identical to an older version of itself"
-    // to compute an up-to-date result
-    let usedPseudoTimestamp = false;
 
     // Compute the outputs of this project and its "newest own" input file
     const allOutputs: string[] = [];
@@ -415,10 +513,16 @@ function checkUpToDateRelativeToInputs(configFile: ts.ParsedCommandLine | undefi
         }
     }
 
+    // This tracks if we've relied the "new file is identical to an older version of itself"
+    // to compute an up-to-date result
+    let usedPseudoTimestamp = false;
+
     // Compute up-to-dateness relative to the reference
     let newestPseudoInput = -1;
     for (const dependentFile of referenceInputs) {
         const dependentFileTime = fs.statSync(dependentFile).mtimeMs;
+        verbose(`Reference input file ${dependentFile} last updated at ${toShortTime(dependentFileTime)}`);
+
         const pseduoInputFileTime = context.unchangedOutputs.getValueOrUndefined(dependentFile);
         // A prior unchanged version of this file exists
         if (pseduoInputFileTime !== undefined) {
@@ -431,7 +535,6 @@ function checkUpToDateRelativeToInputs(configFile: ts.ParsedCommandLine | undefi
             }
         }
 
-        verbose(`Reference input file ${dependentFile} last updated at ${toShortTime(dependentFileTime)}`);
         if (dependentFileTime > newestInputFileTime) {
             newestInputFileTime = dependentFileTime;
             newestInputFileName = dependentFile;
@@ -485,6 +588,10 @@ function rootDirOfOptions(opts: ts.CompilerOptions, configFileName: string) {
 }
 
 function getFriendlyOutputName(opts: ts.CompilerOptions): string {
+    if (!opts.outFile && !opts.outDir) {
+        throw new Error(`Did not expect to find neither outFile nor outDir here`);
+    }
+
     if (opts.outFile) {
         return friendlyNameOfFile(opts.outFile);
     } else {
@@ -493,15 +600,22 @@ function getFriendlyOutputName(opts: ts.CompilerOptions): string {
 }
 
 function verbose(message: string) {
-    if (doVerbose) {
+    if (beVerbose) {
+        console.log(message);
+    }
+}
+
+function unquiet(message: string) {
+    if (!beQuiet) {
         console.log(message);
     }
 }
 
 namespace main {
-    console.log(`tsbuild@${require('../package.json').version} + typescript@${ts.version}`);
+    // console.log(`tsbuild@${require('../package.json').version} + typescript@${ts.version}`);
     const whatToDo = parseCommandline(yargsSetup.parse());
-    doVerbose = whatToDo.verbose;
+    beVerbose = whatToDo.verbose;
+    beQuiet = whatToDo.quiet;
     main(whatToDo);
 
     function main(whatToDo: TsBuildCommandLine) {
@@ -530,7 +644,7 @@ namespace main {
         }
 
         function rebuildGraph() {
-            console.log('Rebuilding project graph due to an edit in a config file');
+            unquiet('Rebuilding project graph due to an edit in a config file');
             graph = createDependencyGraph(whatToDo.roots);
             for (const w of watchers) {
                 w.close();
@@ -551,38 +665,40 @@ namespace main {
             let pseudoBuildTime: false | Date = false;
             switch (status.result) {
                 case "older-than-dependency":
-                    opts.quiet || console.log(`Project ${projectName} is out-to-date with respect to its dependency ${friendlyNameOfFile(status.dependency)}`);
+                    unquiet(`Project ${projectName} is out-to-date with respect to its dependency ${friendlyNameOfFile(status.dependency)}`);
                     break;
                 case "missing":
-                    opts.quiet || console.log(`Project ${projectName} has not built output file ${friendlyNameOfFile(status.missingFile)}`);
+                    unquiet(`Project ${projectName} has not built output file ${friendlyNameOfFile(status.missingFile)}`);
                     break;
                 case "out-of-date":
-                    opts.quiet || console.log(`Project ${projectName} has input file ${friendlyNameOfFile(status.newerFile)}@${toShortTime(status.newerTimestamp)} newer than output file ${friendlyNameOfFile(status.olderFile)}@${toShortTime(status.olderTimestamp)}`);
+                    unquiet(`Project ${projectName} has input file ${friendlyNameOfFile(status.newerFile)}@${toShortTime(status.newerTimestamp)} newer than output file ${friendlyNameOfFile(status.olderFile)}@${toShortTime(status.olderTimestamp)}`);
                     break;
                 case "up-to-date":
-                    opts.quiet || console.log(`Project ${projectName} is up-to-date with respect to its inputs`);
+                    unquiet(`Project ${projectName} is up-to-date with respect to its inputs`);
                     shouldBuild = whatToDo.force;
                     break;
                 case "pseudo-up-to-date":
-                    opts.quiet || console.log(`Project ${projectName}'s dependencies were rebuilt, but didn't change .d.ts. Performing pseudobuild`);
+                    unquiet(`Project ${projectName}'s dependencies were rebuilt, but didn't change .d.ts`);
                     pseudoBuildTime = status.timestamp;
                     break;
                 case "unbuildable":
-                    opts.quiet || console.log(`Cannot continue build`);
+                    console.error(`Cannot continue build due to a fatal error`);
                     return false;
                 default:
                     throwIfReached(status, "Unknown up-to-date return value");
             }
             if (shouldBuild && !whatToDo.dry) {
-                if (pseudoBuildTime) {
-                    performPseudoBuild(configFileName, pseudoBuildTime, context);
-                    return true;
-                } else {
-                    const result = buildProject(configFileName, context);
-                    return (result & BuildResultFlags.Errors) === BuildResultFlags.None;
+                if (pseudoBuildTime && !whatToDo.force) {
+                    if (tryPseudoBuild(configFileName, pseudoBuildTime, context)) {
+                        return true;
+                    }
+                
                 }
+                const result = buildProject(configFileName, context);
+                return (result & BuildResultFlags.Errors) === BuildResultFlags.None;
             }
             return true;
         }
     }
 }
+

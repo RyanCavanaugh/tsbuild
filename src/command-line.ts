@@ -20,6 +20,7 @@ export interface TsBuildCommandLine {
     watch: boolean;
     force: boolean;
     verbose: boolean;
+    quiet: boolean;
     viz: false | true | "deep";
 }
 
@@ -39,6 +40,10 @@ export const yargsSetup = yargs
         alias: 'f',
         default: false,
         description: "Force rebuild of all projects"
+    })
+    .option('quiet', {
+        default: false,
+        description: "Shhhhh"
     })
     .option('verbose', {
         default: false,
@@ -65,6 +70,13 @@ export function parseCommandline(cmdLine: YargsCommandLine): TsBuildCommandLine 
     }
 
     if (!anythingHappened) {
+        if (fs.existsSync("./tsconfig.json")) {
+            anythingHappened = true;
+            addInferred("./tsconfig.json");
+        }
+    }
+
+    if (!anythingHappened) {
         addInferred('.');
     }
 
@@ -74,6 +86,7 @@ export function parseCommandline(cmdLine: YargsCommandLine): TsBuildCommandLine 
         watch: cmdLine.watch || false,
         force: cmdLine.force || false,
         viz: cmdLine.viz || false,
+        quiet: cmdLine.quiet || false,
         verbose: cmdLine.verbose || false
     };
 
