@@ -1,6 +1,6 @@
 {
   "name": "@ryancavanaugh/tsbuild",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "description": "Reference Implementation for TypeScript Composite Project Build Orchestration",
   "main": "./bin/index.js",
   "scripts": {
@@ -26,7 +26,7 @@
   },
   "homepage": "https://github.com/RyanCavanaugh/tsbuild#readme",
   "dependencies": {
-    "@ryancavanaugh/typescript": "^2.8.0-projrefbeta6",
+    "@ryancavanaugh/typescript": "^2.8.0-projrefbeta7",
     "chokidar": "^2.0.0",
     "glob": "^7.1.2",
     "minimist": "^1.2.0",
