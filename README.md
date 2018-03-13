@@ -72,6 +72,8 @@ Each element in the array points to a `tsconfig` file or a folder containing a f
 
 The demo repo https://github.com/RyanCavanaugh/project-references-demo-2 is a buildable example that uses project references to set up a dozen projects in a complex graph.
 
+You'll also need to set `{ "composite": true }` in any referenced tsconfig file.
+
 ### Feedback
 
 Please include the full version number (printed at the top of every invocation) with any bug reports. I'll be publishing updates to the NPM package as I fix things / add features, so you may want to run 'npm update -g @ryancavanaugh/tsbuild' every so often to pick up the latest build.
