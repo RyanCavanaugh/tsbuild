@@ -93,9 +93,12 @@ export function parseCommandline(cmdLine: YargsCommandLine): TsBuildCommandLine 
     function addInferred(unknown: string) {
         const unknownResolved = resolvePathRelativeToCwd(unknown);
         if (!fs.existsSync(unknownResolved)) {
-            return {
-                error: `File ${unknown} doesn't exist`
-            };
+            // Wildcard - recursively look for matched files
+            const configs = glob.sync(path.join(unknownResolved));
+            for (const cfg of configs) {
+                addRootProject(cfg);
+            }
+            return;
         }
         if (fs.lstatSync(unknownResolved).isDirectory()) {
             // Directory - recursively look for tsconfig.json files
